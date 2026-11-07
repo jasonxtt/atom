@@ -171,14 +171,21 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 | `dns.servers` | `fakeip`：inet4 网段，默认 `28.0.0.0/8`，可配置 **[定]**；`resolver`：解析节点域名用的普通上游 |
 | `dns.rules` | A/AAAA → fakeip |
 | `outbounds` | 节点 `n-*`、节点组 `g-*`、`direct` |
-| `route.rules` | `dns-in` → hijack-dns；IP 规则（4.6）→ 对应的组 |
+| `route.rules` | `dns-in` → hijack-dns；`mixed-in` → resolve（AtomDNS）→ FakeIP 地址走绑定或 Final，其他走 direct；IP 规则（4.6）→ 对应的组 |
 | `route.final` | Final selector |
 | `experimental.cache_file` | 启用，`store_fakeip: true`（锁定） |
 | `experimental.clash_api` | 只监听 127.0.0.1，带随机生成的密钥 |
 
 - **节点域名的解析**不能经过 AtomDNS，否则国外节点域名会拿到 FakeIP，形成回环。`resolver` 默认用 AtomDNS 设置里的国内上游地址，由 sing-box 直接去问；用户也可以自己指定。**[定]**
 - **FakeIP 网段 `28.0.0.0/8`**：这是已分配的公网地址段（美国国防部），公网上实际不路由，社区常用来做 FakeIP。代价是真要访问这个段的真实地址时会被当成 FakeIP。**[定]**
-- **mixed 入站（7890）的流量不经过规则表**：浏览器通过 7890 发来的是域名，不是 FakeIP，sing-box 里没有绑定，会全部走 Final。也就是说，用 7890 等于全局代理。v0 先这样，并在 UI 上说明。**[建议]** 以后如果要让 7890 也按规则分流，需要单独设计。**[待定]**
+- **mixed 入站（7890）也按规则分流。** **[定]** 浏览器通过 7890 发来的是域名，sing-box 先用 `resolve` 动作（`server` 指向本机 AtomDNS 53 端口）问 AtomDNS，再按回答走：
+  - 返回 FakeIP：按域名查绑定，有绑定走对应的组，没有走 Final，目标保留域名，由代理服务器远端解析；
+  - 返回真实 IP：走 direct；
+  - 返回空或 NXDOMAIN：解析失败，连接被拒，等于屏蔽。
+  
+  AtomDNS 在返回应答之前已经把查询转给 sing-box 的 FakeIP 入口、写好了绑定，所以不存在时序问题。AtomDNS 不需要改动。直连、代理、屏蔽三种分流用原版的路由规则就能表达；"按组"这一步要在 sing-box 补丁里加一处：`matchRule` 里 resolve 完成后，如果解析出的地址属于 FakeIP，就按域名查绑定。估计 15 到 20 行。
+  
+  限制：每个新连接多一次本机 DNS 查询，只针对 7890 流量；AtomDNS 看到的查询来源都是 127.0.0.1，所以带"来源客户端"条件的规则对 7890 流量无效；7890 直接发来 IP 的连接，只匹配 IP 规则，没命中就走 Final。
 - **应用流程**：生成 → `sing-box check` → 原子写入 → 发 SIGHUP 让 sing-box 重新加载 → 通过 Clash API 确认新实例起来了；失败就写回旧配置再重载一次。sing-box v1.14.4 的 `cmd_run.go` 收到 SIGHUP 会重新加载配置。
 - 切换节点和测速走 Clash API，不需要重载。
 
@@ -191,7 +198,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 | `dns_mode` | 固定为 FakeIP，RealIP 的代码路径删除 |
 | `cn_fakeip` | 固定为关 |
 | FakeIP 上游（`nocnfake`） | 固定为本机 sing-box 的 `dns-in` |
-| 国外 DNS 走的代理（`$main_proxy`） | 默认是 `socks5://127.0.0.1:7890`，即本机 sing-box 的 mixed 入站，经 Final 出去。可以按上游单独关闭。UDP 上游不能走 SOCKS（AtomDNS 现有规则），所以默认的国外上游用 DoH/DoT/TCP。**[建议]** |
+| 国外 DNS 走的代理（`$main_proxy`） | 默认是 `socks5://127.0.0.1:7890`，即本机 sing-box 的 mixed 入站，经 Final 出去。可以按上游单独关闭。UDP 上游不能走 SOCKS（AtomDNS 现有规则），所以默认的国外上游用 DoH/DoT/TCP。不用 nft 在 OUTPUT 链导流：那样要处理本机流量、同步上游 IP 集合，还要防回环。**[定]** |
 | 专属分流组 | 删除 |
 | `realiplist`、`cnfakeipfilter` | 删除（"代理但返回真实 IP"在 FakeIP 网段分流架构下等于悄悄直连）**[待定]**：先核实它们现在的确切语义 |
 | AtomDNS 原有的在线更新（程序、配置包、WebUI） | 删除，改为产品自己的更新渠道 |
@@ -274,7 +281,7 @@ atom/
 
 1. **AtomDNS fork 打底**：从 main 建分支；锁定 7.1 里的项，删除 RealIP、专属分流组和在线更新；加上 EDNS0 65001 编码，Final 路径发 CLEAR。验收：沿用现有名单，链路能跑通，FakeIP 带上 CLEAR。
 2. **规则表**：模型、首条命中匹配插件、`rules` API、拖动、`rules/test`；规则命中"代理"时发 SET。
-3. **sing-box 配置生成**：节点导入（JSON/YAML/链接）、节点组、Final、事务式应用和回滚。
+3. **sing-box 配置生成**：节点导入（JSON/YAML/链接）、节点组、Final、事务式应用和回滚；7890 按规则分流，包括 sing-box 补丁里 resolve 之后查绑定的那一处。
 4. **联调**：在测试机上组装 VM 环境，配好 nft，做端到端验证（TCP/UDP、拖动后立即生效、重启后恢复）。
 5. **绑定账本和缓存失效**（4.5）。
 6. **简易 WebUI + OpenAPI 规范定稿**。
@@ -286,4 +293,5 @@ atom/
 
 - 第 12 节原来的 6 个问题都已答复，答复已写回上面对应的章节。
 - 没有单独提到的 **[建议]** 项，用户都认可，按建议执行。
-- 还在等确认的只有一项：国外 DNS 走 SOCKS（mixed 7890），还是用 nft 在 OUTPUT 链把流量导进 sing-box（7.1）。
+- 国外 DNS 走 SOCKS（mixed 7890），见 7.1；7890 的流量也按规则分流，见第 6 节，在第 3 步实现。**[定]**
+- 目前没有等待确认的项。
