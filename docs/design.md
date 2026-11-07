@@ -81,6 +81,8 @@ FakeIP 流量 ─>│ FakeIP 还原域名 → 绑定的出口 / route.final → 
 - 只在发往本机 sing-box FakeIP 入口的查询上附加；其他上游不带这个选项，避免泄露到公网。
 - 先剥掉客户端自带的 65001 选项，再写入自己的指令。
 - 规则命中"代理 → 组 X"时发 SET X；原判断的结果是国外时发 CLEAR，由 `route.final` 处理。所以大部分域名不会在 sing-box 里留绑定记录。**[定]**
+- 实现（第 1 步）：在 fork 的 `rust/native-host/src/edns_directive.rs`，挂在 `ForwardCatalog` 发往上游的出口上，所有上游查询都经过这里。发往 `nocnfake` 组的查询：去掉客户端带的 65001，加上 CLEAR（`[1,2]`）；客户端没有 OPT 时补一个 OPT（UDP 大小 1232）。发往其他组的查询：没有 65001 时原样发出；带了就去掉，其他 option（ECS、cookie 等）保留。`nocnfake` 的查询如果 OPT 解析不了就报错，不发给 sing-box。
+- 注意：FakeIP 应答会进全局缓存（`cache_all`），命中缓存时不再问 sing-box，也就不会重发 CLEAR/SET。第 1 步只有 CLEAR，不受影响；第 2 步发 SET 以后，规则变化要按 4.5 清缓存。
 
 ## 4. 规则表 **[定]**
 
@@ -197,13 +199,13 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 |---|---|
 | `dns_mode` | 固定为 FakeIP，RealIP 的代码路径删除 |
 | `cn_fakeip` | 固定为关 |
-| FakeIP 上游（`nocnfake`） | 固定为本机 sing-box 的 `dns-in` |
-| 国外 DNS 走的代理（`$main_proxy`） | 默认是 `socks5://127.0.0.1:7890`，即本机 sing-box 的 mixed 入站，经 Final 出去。可以按上游单独关闭。UDP 上游不能走 SOCKS（AtomDNS 现有规则），所以默认的国外上游用 DoH/DoT/TCP。不用 nft 在 OUTPUT 链导流：那样要处理本机流量、同步上游 IP 集合，还要防回环。**[定]** |
-| 专属分流组 | 删除 |
-| `realiplist`、`cnfakeipfilter` | 删除（"代理但返回真实 IP"在 FakeIP 网段分流架构下等于悄悄直连）**[待定]**：先核实它们现在的确切语义 |
-| AtomDNS 原有的在线更新（程序、配置包、WebUI） | 删除，改为产品自己的更新渠道 |
+| FakeIP 上游（`nocnfake`） | 固定为本机 sing-box 的 `dns-in`（`udp://127.0.0.1:6666`）。`POST /api/v1/upstream/config` 拒绝修改它，`settings.json` 里存的列表也被忽略 |
+| 国外 DNS 走的代理（`$main_proxy`） | 默认是 `socks5://127.0.0.1:7890`（`settings.yaml` 里写作 `addr: "127.0.0.1:7890"`），即本机 sing-box 的 mixed 入站，经 Final 出去。可以按上游单独关闭。UDP 上游不能走 SOCKS（AtomDNS 现有规则），所以默认的国外上游用 DoH/DoT/TCP。不用 nft 在 OUTPUT 链导流：那样要处理本机流量、同步上游 IP 集合，还要防回环。**[定]** |
+| 专属分流组 | 删除。第 1 步在产品配置里删掉（不 include `special_groups.yaml`，主流程去掉 `$special_upstream_matcher`、`$sequence_special`）；程序只在配置 include 了这个文件时才启用专属分流组，所以这部分 Rust 代码现在不会执行，和原有的规则名单 API 一起在第 6 步删除 |
+| `realiplist`、`cnfakeipfilter` | 删除（"代理但返回真实 IP"在 FakeIP 网段分流架构下等于悄悄直连）**[待定]**。已核实（2026-11-08）：`realiplist`（mark 9）在所有名单里优先级最高，A/AAAA 和其他类型都问国外 DNS（经 `main_proxy`），返回国外真实 IP，流量不进 sing-box；`cnfakeipfilter`（mark 10）只在 `cn_fakeip` 开启时生效，`cn_fakeip` 锁定为关以后在所有流程里都不起作用。第 1 步：`cnfakeipfilter` 的分支随 `cn_fakeip` 一起删掉（行为不变），名单和 mapper 条目暂时留着；`realiplist` 原样保留，等用户确认是否删除。 |
+| AtomDNS 原有的在线更新（程序、配置包、WebUI） | 删除，改为产品自己的更新渠道。第 1 步删掉了整个 `update` 模块（含 `update-guard` 子命令、中断恢复、`/api/v1/update/*`、`/api/v1/config/export`），容器模式（`ATOMDNS_CONTAINER`，用镜像里的配置包初始化卷）依赖配置包，一起删了；`docker/` 和发布脚本还没清理 |
 | AtomDNS 原有的 WebUI 和规则名单 API | 不再提供 |
-| YAML 配置 | 由产品自带，用户不改 |
+| YAML 配置 | 由产品自带，用户不改。放在 fork 的 `config/`，来自 `jasonxtt/file` 的 `atomdns/config/full/config_rust`（v0.6.4，schema 7），改动见 `config/README.md` |
 | sing-box `cache_file.store_fakeip` | 固定开 |
 | 管理 API 监听地址 | 监听局域网，暂不做登录鉴权 **[定]** |
 
@@ -269,7 +271,7 @@ v0 不做 IPv6 FakeIP，被代理的域名只返回 IPv4。
 atom/
   README.md
   docs/        设计、补丁说明、API 规范、部署文档
-  atomdns/     AtomDNS fork（独立 git 仓库，分支 atom/main）
+  atomdns/     AtomDNS fork（独立 git 仓库，分支 atom/main；自带的 YAML 配置在 atomdns/config/）
   sing-box/    sing-box fork（独立 git 仓库，分支 atom/fakeip-outbound）
   installer/   安装器（以后）
 ```
