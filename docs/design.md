@@ -1,6 +1,6 @@
 # atom 设计文档 v0
 
-状态：v0 已审，第 12 节的问题已答复。日期：2026-11-08。
+状态：v0 已审，第 12 节的问题已答复；第 2 步实现时新定的事项写回了第 3、4、8 节。日期：2026-11-08。
 
 标记说明：**[定]** 表示已经和用户确认；**[建议]** 是我的提议，等审阅；**[待定]** 表示还要讨论。
 
@@ -66,10 +66,10 @@ FakeIP 流量 ─>│ FakeIP 还原域名 → 绑定的出口 / route.final → 
 | 1 重写、2 类型屏蔽 | 保留，成为"系统固定项" |
 | 3 `unified_matcher1` 名单打标 | 用户维护的名单（黑名单、白名单、灰名单、`cuscn`、`cusnocn`、`realiplist`、`cnfakeipfilter`）改由规则表表达；`geosite_cn` / `geosite_no_cn` 和学习结果留给第 3 层的原判断 **[建议]** |
 | 4/6 专属分流组 | 删除 **[建议]** |
-| 5 黑名单、广告 | 变成规则表里的普通规则，可以拖动（见 4.4） |
+| 5 黑名单、广告 | 广告变成规则表里的普通规则，可以拖动（见 4.4）；第 2 步删掉了固定的广告屏蔽步骤和 `block_ads` 开关。黑名单屏蔽暂时保留，挪到规则表后面，第 6 步并入规则表 **[定]** |
 | 7 DDNS | 保留现有的 DDNS 名单和流程（不缓存，`ddns_foreign` 开关保留），名单在控制面编辑。**[定]** 放在系统固定项里、排在规则表之前。**[建议]** |
 | 8 指定客户端直连 | 变成规则条件"来源客户端"（见 4.2） |
-| 9 全局缓存 | 保留；规则变化时要清空（见 4.5） |
+| 9 全局缓存 | 保留，排在规则表后面；规则变化时清空（见 4.5） |
 | 10/11 名单内、名单外 | 保留，成为第 3 层的原判断 |
 
 现有的 `domain_mapper` 是把所有命中名单的 mark 合并起来，不是"第一条命中"。规则表需要新写一个匹配插件，可以复用 `matcher-core` 里的 trie、keyword 和 regex 实现。**[建议]**
@@ -83,6 +83,8 @@ FakeIP 流量 ─>│ FakeIP 还原域名 → 绑定的出口 / route.final → 
 - 规则命中"代理 → 组 X"时发 SET X；原判断的结果是国外时发 CLEAR，由 `route.final` 处理。所以大部分域名不会在 sing-box 里留绑定记录。**[定]**
 - 实现（第 1 步）：在 fork 的 `rust/native-host/src/edns_directive.rs`，挂在 `ForwardCatalog` 发往上游的出口上，所有上游查询都经过这里。发往 `nocnfake` 组的查询：去掉客户端带的 65001，加上 CLEAR（`[1,2]`）；客户端没有 OPT 时补一个 OPT（UDP 大小 1232）。发往其他组的查询：没有 65001 时原样发出；带了就去掉，其他 option（ECS、cookie 等）保留。剥 65001 只按 OPT 的结构逐个遍历选项，不依赖 ECS 等选项的语义校验（比如重复 ECS 时照样剥）；附加记录连结构都解析不了的查询，对所有上游都拒绝，不原样发出。`nocnfake` 的查询还要通过完整的 OPT 校验，过不了就报错，不发给 sing-box。改写过的查询一律用展开后的域名重建问题段，因为原包里的压缩指针可能指向后面会移动的选项字节。
 - 注意：FakeIP 应答会进全局缓存（`cache_all`），命中缓存时不再问 sing-box，也就不会重发 CLEAR/SET。第 1 步只有 CLEAR，不受影响；第 2 步发 SET 以后，规则变化要按 4.5 清缓存。
+- SET 的实现（第 2 步）：规则表插件命中"代理 → 组 X"时，把 X 写进查询状态（`ExecutionState::outbound`，在 `sequence-core`）；`ForwardCatalog` 发往上游时把它交给 `edns_directive.rs`，发往 `nocnfake` 的查询写 SET X，没有 X 时写 CLEAR，其他上游不带。规则表排在 `cache_all` 前面，命中代理规则的查询不经过全局缓存，每次都会把 SET 发给 sing-box；规则每次变化都清空所有缓存（4.5 第 1 条），所以删掉代理规则后，`cache_all` 里不会留着旧的 FakeIP 挡住 CLEAR。**[定]**
+- 附加记录的 owner 名（第 2 步修）：先按问题段的规则校验展开后的名字（压缩指针不能越界、不能自指、不能成环），再接受这条记录；以前只是跳过 owner，这类 TYPE=OPT 的记录会被原样发给普通上游。
 
 ## 4. 规则表 **[定]**
 
@@ -100,7 +102,7 @@ Rule {
 
 规则表是一个有序数组，从上往下，第一条命中的生效，没命中就进入第 3 层原判断。
 
-### 4.2 匹配条件 **[建议]**
+### 4.2 匹配条件 **[定]**
 
 | 类型 | 说明 |
 |---|---|
@@ -109,7 +111,9 @@ Rule {
 | `client` | 来源客户端 IP 或网段，可以和域名条件组合 |
 | `ip_cidr` | 目标 IP 网段，用于 Telegram 这类直接按 IP 连接的流量，见 4.6 |
 
-一条规则内部是"或"还是"与"：**[建议]** 同一类条件之间是"或"，不同类之间是"与"。比如"suffix google.com 或 youtube.com，并且客户端是 192.168.1.50"。
+一条规则内部是"或"还是"与"：**[定]** 同一类条件之间是"或"，不同类之间是"与"。比如"suffix google.com 或 youtube.com，并且客户端是 192.168.1.50"。
+
+"类"的划分（第 2 步实现时定下）：`domain`、`suffix`、`keyword`、`regex`、`ruleset` 都是域名条件，算同一类；`client` 是第二类；`ip_cidr` 由 sing-box 匹配（4.6）。所以"domain a.com，ruleset 广告"表示 a.com 或广告域名。只有 `client` 条件的规则匹配这个客户端的所有域名。规则至少要有一个条件。
 
 ### 4.3 拖动排序
 
@@ -121,24 +125,45 @@ Rule {
 
 广告（AdGuard 在线规则）和黑名单也是规则表里的普通规则，动作是"屏蔽"，可以拖动。用户要放行某个误杀的域名，把一条"直连"规则拖到它前面就行。
 
-新安装时的默认规则表 **[建议]**：
+新安装时的默认规则表 **[定]**：
 
-1. 局域网和私有域名 → 直连
-2. 广告 → 屏蔽
+1. 局域网和私有域名 → 直连（后缀 `lan`、`local`、`localhost`、`localdomain`、`home.arpa`、`internal`）
+2. 广告 → 屏蔽（`ruleset: adguard`，按 AdGuard 规则自己的屏蔽/放行判断）
 
-其余全部交给原判断。
+其余全部交给原判断。`atom_rules.json` 不存在时使用默认规则表，第一次修改时才写文件（`atomdns check` 不会写）。
+
+黑名单、白名单、灰名单、`cuscn`、`cusnocn` 这些自带名单暂时留在原判断里，第 6 步换 WebUI 时再并入规则表。**[定]**
 
 ### 4.5 规则变化后的生效
 
 sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS 应答，所以规则改动天然会有滞后。处理办法：
 
-1. 清空 AtomDNS 的各级缓存。**[建议]** v0 直接全清，以后再细化为按受影响的域名清。
+1. 清空 AtomDNS 的各级缓存。v0 直接全清，以后再细化为按受影响的域名清。**[定]** 第 2 步已实现：`/api/v1/atom/` 下每次成功的修改（规则、规则集）都清空配置里的所有缓存。
 2. **绑定账本**：AtomDNS 在内存里记录"给 sing-box 发过 SET 的域名 → 组"，用 LRU 限制大小。规则变化后，用新规则重算这些域名，把有变化的 SET/CLEAR 直接用 DNS 查询发给 sing-box，不需要新接口。这样"组 X 改成组 Y"可以立即生效。**[建议]**
 3. 直连和代理互换的情况，客户端手里拿的是真实 IP，只能等它的 DNS 缓存过期。直连应答的 TTL 要设上限（可配置，默认 **[待定]**）。
 
 ### 4.6 IP 规则
 
 目标是 IP 的规则不经过 DNS，AtomDNS 处理不了。控制面把它们编译成 sing-box 的 `ip_cidr` 路由规则，同时让 nft 把这些网段导进 sing-box。这是唯一一类在 sing-box 里匹配的规则。**[建议]**
+
+### 4.7 实现（第 2 步）
+
+- **插件**：`atom_rules`（`rust/native-host/src/atom_rules.rs`，配置在 `atomdns/config/sub_config/atom_rules.yaml`）。它是一个 fixture，只给查询打动作标记：屏蔽 fast_mark 40、代理 41、直连 42；代理时另外把组写进 `ExecutionState::outbound`。主流程按标记分派，所以执行顺序仍写在 YAML 里。匹配复用 `matcher-core`：域名条件用 `MixSet`（full/domain 用排序池，regex、keyword 照旧），客户端用 `IpPrefixList`。规则逐条按顺序判断，第一条命中的生效。
+- **位置**：重写、类型屏蔽、`unified_matcher1` 打标、IPv4 优先、DDNS 之后，原判断之前。原来排在前面的"记忆无 V4/V6"空答和黑名单屏蔽挪到规则表后面：否则一个被代理的域名如果曾经学到"无 V4"，会直接拿到空应答；直连规则也盖不过黑名单。刷新流程 `sequence_requery` 用同样的顺序。**[定]**
+- **动作**：
+  - 代理 → 组 X：A/AAAA 走 `$sequence_fakeip_exit`，向 sing-box 要 FakeIP，查询带 SET X，不问国内外 DNS；其他类型（MX、TXT 等）问国外 DNS，和灰名单在 `process_ot.yaml` 里的做法一样。AAAA 也发给 sing-box（同一个 SET），sing-box 只配了 IPv4 网段，返回空。
+  - 直连：A/AAAA 走 `$sequence_local_exit`（国内 DNS，真实 IP），其他类型走 `$sequence_local`；兼容模式和安全模式都问国内，因为这是用户明确指定的。
+  - 屏蔽：`reject 0`，即 NOERROR 空应答。**[定]**
+- **审计**：命中的规则写进 `domain_set`（`规则:<备注或 ID>`）和 `matched_rule_source`（`atom_rule:<ID>`）。
+- **内置规则集**：YAML 的 `builtin` 列出规则能直接引用的名字：`adguard`（`adguard_rule`，按 AdGuard 自己的屏蔽/放行匹配）、`geosite_cn`、`geosite_no_cn`（`unified_matcher1` 打标的名单，按 mapper 给它们打的 fast_mark 判断，所以 `$atom_rules` 要排在 `$unified_matcher1` 后面）。
+- **自定义规则集**：
+  - 远程 URL：格式 text/YAML/JSON/SRS/`.dat`（要 `category`）/`.mrs`，下载后转换成本地列表；下载走 `main_proxy`（7890）。
+  - 本地列表：通过 API 编辑，条目是 `domain:`/`full:`/`keyword:`/`regexp:`，不带前缀的条目当作 `domain:`。
+  - 第一次下载失败时，规则集照样创建，记下 `last_error`，内容为空。刷新失败时保留旧内容。
+  - 被规则引用的规则集不能删除，返回 409 和这些规则的 ID。
+- **持久化**：规则表存在 `webinfo/atom_rules.json`（`{version, rules}`），规则集存在 `webinfo/atom_rulesets.json`，列表内容存在 `webinfo/atom_rulesets/<id>.txt`，都是写临时文件再改名。每次修改先校验、编译出新的匹配表，再写盘，最后整张表替换（`Live`）：查询要么看到旧表，要么看到新表，DNS 不中断。文件读不了或解析不了时，配置编译失败，程序不启动，不会悄悄换成默认表。**[定]**
+- **group_id**：组到第 3 步才有，现在只校验格式：非空、没有首尾空白和控制字符、最长 64 字节。`atom_rules.rs` 的 `validate_group` 是以后检查"组存在"的位置。
+- **ip_cidr**：API 先拒绝，第 3 步和 sing-box 配置生成一起做（4.6）。
 
 ## 5. 节点与节点组
 
@@ -237,6 +262,13 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 | `apply` | 查询最近一次变更的应用结果（见下） |
 
 - 写操作即时生效。每次写入是一个事务：校验 → 生成 → `sing-box check` → 写入 → 重载 → 提交；任何一步失败就整体回滚，返回明确的错误。
+- `rules` 和 `rulesets`（第 2 步实现，`rust/native-host/src/atom_rules_api.rs`）：
+  - `GET rules` 返回 `{version, rules}`。规则的 JSON：`{id, enabled, remark, match: {domain, suffix, keyword, regex, ruleset, client, ip_cidr}, action: {type: proxy, group_id} | {type: direct} | {type: block}}`。
+  - `POST rules` 新建，可以带 `before_id`/`after_id` 指定位置，默认放最后。`PUT rules/{id}` 整条替换。`DELETE rules/{id}?version=N` 删除。
+  - `POST rules/move {id, before_id | after_id, version}` 拖动，`version` 必填。其他写操作的 `version` 可选，带了就检查。版本不对时返回 409，错误体里带当前 `version`。每次规则变化，版本加 1。
+  - `POST rules/test {domain, client?}` 返回命中的规则（`matched`、`index`、`action`、`group_id`、`rule`），没命中时返回 `{matched: false, fallthrough: "original"}`，即交给原判断。只看规则表，不模拟系统固定项和原判断。
+  - `GET rulesets` 列出内置集合（`type: builtin`）和自定义规则集；`GET rulesets/{id}` 带上列表内容。`POST rulesets` 的请求体是 `{name, type: remote, url, format?, category?}` 或 `{name, type: local, rules}`。`PUT rulesets/{id}` 改名、改地址或替换本地列表。`DELETE rulesets/{id}` 删除。`POST rulesets/{id}/refresh` 重新下载。
+  - 错误体都是 AtomDNS 现有的 `{"error": "..."}`。写操作和 `rulesets` 的下载都占用管理租约，和设置、配置重载互斥。
 - 错误格式沿用 AtomDNS 现有的格式。**[定]**
 - 暂不做鉴权。**[定]**
 
@@ -282,8 +314,8 @@ atom/
 
 ## 11. 实施顺序 **[建议]**
 
-1. **AtomDNS fork 打底**：从 main 建分支；锁定 7.1 里的项，删除 RealIP、专属分流组和在线更新；加上 EDNS0 65001 编码，Final 路径发 CLEAR。验收：沿用现有名单，链路能跑通，FakeIP 带上 CLEAR。
-2. **规则表**：模型、首条命中匹配插件、`rules` API、拖动、`rules/test`；规则命中"代理"时发 SET。
+1. **AtomDNS fork 打底**（已完成）：从 main 建分支；锁定 7.1 里的项，删除 RealIP、专属分流组和在线更新；加上 EDNS0 65001 编码，Final 路径发 CLEAR。验收：沿用现有名单，链路能跑通，FakeIP 带上 CLEAR。
+2. **规则表**（已完成，实现见 4.7）：模型、首条命中匹配插件、`rules` API、拖动、`rules/test`；规则命中"代理"时发 SET。另外做了 `ruleset` 条件的全部三种来源（内置、远程 URL、本地列表）和 `rulesets` API。**[定]** 还没做：远程规则集的定时自动更新（现在只能手动 `refresh`）。
 3. **sing-box 配置生成**：节点导入（JSON/YAML/链接）、节点组、Final、事务式应用和回滚；7890 按规则分流，包括 sing-box 补丁里 resolve 之后查绑定的那一处。
 4. **联调**：在测试机上组装 VM 环境，配好 nft，做端到端验证（TCP/UDP、拖动后立即生效、重启后恢复）。
 5. **绑定账本和缓存失效**（4.5）。
