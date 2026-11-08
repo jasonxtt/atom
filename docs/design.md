@@ -115,6 +115,8 @@ Rule {
 
 "类"的划分（第 2 步实现时定下）：`domain`、`suffix`、`keyword`、`regex`、`ruleset` 都是域名条件，算同一类；`client` 是第二类；`ip_cidr` 由 sing-box 匹配（4.6）。所以"domain a.com，ruleset 广告"表示 a.com 或广告域名。只有 `client` 条件的规则匹配这个客户端的所有域名。规则至少要有一个条件。
 
+带 `client` 条件的规则，动作只能是直连或屏蔽，不能是代理。**[定]** 原因：sing-box 只按域名绑定出站组，不区分客户端。比如"客户端 A 的 foo.com → 组 X"：A 一查就发 SET X，于是别的客户端拿到 foo.com 的 FakeIP 后也走 X。别的客户端从缓存拿到 FakeIP 时不发 CLEAR；不走缓存时，A 的 SET 和别人的 CLEAR 会来回覆盖。所以代理规则对所有客户端都一样，客户端条件只用来决定这个客户端能不能走代理（直连或屏蔽）。sing-box 不增加按客户端分流的功能。API 新建或修改这种规则时返回 400。
+
 ### 4.3 拖动排序
 
 - 每条规则有显式的顺序。API 提供移动操作：`{id, before_id | after_id, version}`。
@@ -161,7 +163,10 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
   - 本地列表：通过 API 编辑，条目是 `domain:`/`full:`/`keyword:`/`regexp:`，不带前缀的条目当作 `domain:`。
   - 第一次下载失败时，规则集照样创建，记下 `last_error`，内容为空。刷新失败时保留旧内容。
   - 被规则引用的规则集不能删除，返回 409 和这些规则的 ID。
-- **持久化**：规则表存在 `webinfo/atom_rules.json`（`{version, rules}`），规则集存在 `webinfo/atom_rulesets.json`，列表内容存在 `webinfo/atom_rulesets/<id>.txt`，都是写临时文件再改名。每次修改先校验、编译出新的匹配表，再写盘，最后整张表替换（`Live`）：查询要么看到旧表，要么看到新表，DNS 不中断。文件读不了或解析不了时，配置编译失败，程序不启动，不会悄悄换成默认表。**[定]**
+- **持久化**：规则表存在 `webinfo/atom_rules.json`（`{version, rules}`），规则集存在 `webinfo/atom_rulesets.json`，都是写临时文件再改名。每次修改先校验、编译出新的匹配表，再写盘，最后整张表替换（`Live`）：查询要么看到旧表，要么看到新表，DNS 不中断。文件读不了或解析不了时，配置编译失败，程序不启动，不会悄悄换成默认表。规则表里有不合法的规则（比如带 `client` 的代理规则，见 4.2），也按文件损坏处理，停用的规则同样要校验。**[定]**
+- **规则集列表文件**（codex 复审后改）：每个规则集有一个 `revision`，列表内容存在 `webinfo/atom_rulesets/<id>-<revision>.txt`。每次换列表（本地编辑、下载成功）都写一个新 revision 的文件，然后写 `atom_rulesets.json`，这一步是唯一的切换点。写元数据失败时删掉新文件，旧列表和旧元数据都还在，重启后还是旧的；成功后删掉旧文件。`revision` 为 0 表示还没有列表（远程规则集还没下载成功过，包括第一次下载失败），内容为空，也没有文件。`revision` 不为 0 而文件不存在时，按读不了处理，程序不启动。**[定]** 进程如果恰好在写完元数据、删旧文件之前退出，会留下一个没人引用的旧文件，不影响结果，目前不自动清理。
+- **下载和改地址并发**：下载开始时记下当时的来源（url、format、category），下载完要写入前再核对一次。来源已经被改掉时丢弃这次结果（成功和失败都不记录），返回 409。同一个来源的两次刷新不互斥，后完成的那次生效。
+- **清缓存失败**：清空某个缓存时，如果写空的缓存文件失败（比如磁盘满），改为直接丢弃：先清内存，再删掉缓存文件，免得重启后又读回旧条目。丢弃也失败（文件删不掉）时，接口返回 500，说明修改已经保存并生效，但缓存没清干净。
 - **group_id**：组到第 3 步才有，现在只校验格式：非空、没有首尾空白和控制字符、最长 64 字节。`atom_rules.rs` 的 `validate_group` 是以后检查"组存在"的位置。
 - **ip_cidr**：API 先拒绝，第 3 步和 sing-box 配置生成一起做（4.6）。
 
@@ -268,7 +273,8 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
   - `POST rules/move {id, before_id | after_id, version}` 拖动，`version` 必填。其他写操作的 `version` 可选，带了就检查。版本不对时返回 409，错误体里带当前 `version`。每次规则变化，版本加 1。
   - `POST rules/test {domain, client?}` 返回命中的规则（`matched`、`index`、`action`、`group_id`、`rule`），没命中时返回 `{matched: false, fallthrough: "original"}`，即交给原判断。只看规则表，不模拟系统固定项和原判断。
   - `GET rulesets` 列出内置集合（`type: builtin`）和自定义规则集；`GET rulesets/{id}` 带上列表内容。`POST rulesets` 的请求体是 `{name, type: remote, url, format?, category?}` 或 `{name, type: local, rules}`。`PUT rulesets/{id}` 改名、改地址或替换本地列表。`DELETE rulesets/{id}` 删除。`POST rulesets/{id}/refresh` 重新下载。
-  - 错误体都是 AtomDNS 现有的 `{"error": "..."}`。写操作和 `rulesets` 的下载都占用管理租约，和设置、配置重载互斥。
+  - 错误体都是 AtomDNS 现有的 `{"error": "..."}`。写操作和 `rulesets` 的下载都占用管理租约，和设置、配置重载互斥（租约只防配置重载，不让写操作排队）。
+  - 带 `client` 的代理规则返回 400（4.2）。下载期间规则集的来源被改掉，返回 409，这次结果丢弃。修改已生效但缓存没清干净时返回 500（4.7）。
 - 错误格式沿用 AtomDNS 现有的格式。**[定]**
 - 暂不做鉴权。**[定]**
 
