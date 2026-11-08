@@ -189,12 +189,14 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 
 第 3 步定下的 **[定]**：
 
-- 分享链接第一版支持 7 种：`vless://`（含 reality、ws、grpc、httpupgrade、h2）、`vmess://`（V2RayN 的 base64 JSON）、`trojan://`、`ss://`（SIP002、明文 userinfo 的 2022 写法、旧的整段 base64 写法；插件支持 obfs-local、v2ray-plugin）、`hysteria2://`/`hy2://`、`tuic://`、`anytls://`。其他协议先用 sing-box JSON 导入。
+- 分享链接第一版支持 8 种：`vless://`（含 reality、ws、grpc、httpupgrade、h2）、`vmess://`（V2RayN 的 base64 JSON）、`trojan://`、`ss://`（SIP002、明文 userinfo 的 2022 写法、旧的整段 base64 写法；插件支持 obfs-local、v2ray-plugin）、`hysteria2://`/`hy2://`、`tuic://`、`anytls://`、`socks://`/`socks5://`/`socks5h://`（都转成 sing-box 的 socks version 5，userinfo 可以是明文 `user:pass` 或 V2RayN 的 base64）。hysteria v1 不支持，用 sing-box JSON 导入。其他协议同样先用 JSON 导入。Clash YAML 也支持 `type: socks5`（不带 TLS）。
 - "YAML"指 Clash/mihomo 的 `proxies`：整份 Clash 配置、`proxies` 列表或单个节点都行，协议范围和分享链接一样，和链接共用一套转换。
 - sing-box JSON：单个 outbound、数组，或整份 sing-box 配置（只取代理类型的 outbound，跳过 direct、selector 等）。`tag` 当作节点名称。
 - 批量导入是全有或全无：任何一项转换失败就整体返回 400，错误里写"第 N 项"。导入的节点再经过整份配置的 `sing-box check`，不通过也整体不导入。
 - 节点类型限于代理协议（socks、http、shadowsocks、vmess、trojan、naive、wireguard、hysteria、shadowtls、vless、tuic、hysteria2、anytls、ssh、tor）；outbound 不能带 `tag`（由 atom 设为节点 ID）和 `detour`（链式代理暂不提供）。
 - 删除节点不需要确认：它从所有组和 Final 的成员里移除，组因此变空时按空组处理（5.2）。
+- **不回显凭据**（参考 PR15 后定）：接口返回的节点（列表、详情、导入和修改的结果）去掉所有层级里的 `password`、`username`、`user`、`uuid`、`auth`、`auth_str`、`private_key`、`private_key_passphrase`、`pre_shared_key`。修改节点时可以只改名称；要改连接参数，就重新给一条链接、YAML 或 JSON（`format` + `content`，只能是一个节点）整体替换，名称不变，除非同时给了 `name`。不给内容就保留原来的连接。凭据只存在 `webinfo/atom_proxy.json` 和 sing-box 的 `config.json` 里。
+- **单节点测速**：`POST nodes/{id}/delay` 走 Clash API `GET /proxies/{id}/delay`，和组测速一样，`url` 可选、超时默认 5000 毫秒、限制在 100 到 30000 毫秒之间。
 
 ### 5.2 节点组
 
@@ -253,6 +255,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 
 - **进程管理**：sing-box 跑在独立的 systemd 单元 `atom-sing-box.service` 里（单元文件由第 7 步的安装器写，`ExecReload=kill -HUP $MAINPID`，`Restart=on-failure`）。atom 写完配置后执行 `systemctl reload-or-restart atom-sing-box.service`：单元在运行就发 SIGHUP，没在运行（第一次）就启动它。sing-box 崩了由 systemd 拉起，atom 重启不影响代理。
 - **位置**：配置和 `cache.db` 放在 atom 配置根下的 `sing-box/`。程序路径、工作目录、重载命令、Clash API 地址（`127.0.0.1:9090`）、FakeIP DNS 入站（`127.0.0.1:6666`）、本机 AtomDNS 地址（`127.0.0.1:53`）、redirect 7892 / tproxy 7893、默认 resolver 来自哪个上游组（`domestic`）写在自带 YAML 里 `atom_rules` 插件的 `singbox` 段，不对用户开放。
+- **重载失败不退出**（参考 PR15 后定，sing-box 补丁）：上游 v1.14.4 收到 SIGHUP 后先关掉旧实例；新配置如果通过了 `check` 却启动失败（端口被占用这类运行期错误），进程会直接退出，要等 atom 回滚、systemd 重启，中间代理和国外 DNS 都断。补丁让 `cmd_run.go` 记住上一份成功运行过的配置，新实例启动失败时用它在内存里把旧实例重建出来，进程不退出。atom 这边不用改：旧实例不认新密钥，确认照样失败，atom 写回旧文件再重载一次，最后运行的还是旧配置。
 - **确认新配置生效**：每次应用都生成新的随机 Clash API 密钥写进配置。旧实例不认新密钥，所以用新密钥在 20 秒内拿到 `/proxies`（里面有 `final`）就证明新配置已经在跑。代价：本机接了第三方 Clash 面板的话，每次应用后要重新填密钥（Clash API 只监听 127.0.0.1）。
 - **事务**：校验（规则表和节点状态）→ 生成 → 和运行中的文件比较，一样就跳过 → `sing-box check`（配置先写到 `config.json.next`；不通过返回 400，什么都不动）→ 改名为 `config.json` → 重载 → 确认 → 写 atom 的文件 → 生效。重载或确认失败：写回旧文件（之前没有就删掉），再重载一次并用旧密钥确认，接口返回 502，错误里写回滚结果；atom 的状态和文件都不变。sing-box 已经应用但写 atom 文件失败：同样回滚 sing-box，返回 500。一次应用进行时，其他写操作返回 409（不排队）；整个进程同一时间只有一次应用。找不到 sing-box 程序时不写任何文件，直接报错。
 - **启动时**（包括 AtomDNS 每次重新加载配置后）：生成一遍配置，和运行中的文件比较；不一致（第一次启动、升级后生成规则变了、默认 resolver 跟着国内上游变了）就应用一次；失败只记日志和 `status`，不影响 DNS。
@@ -316,7 +319,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
   - 错误体都是 AtomDNS 现有的 `{"error": "..."}`。写操作和 `rulesets` 的下载都占用管理租约，和设置、配置重载互斥（租约只防配置重载，不让写操作排队）。
   - 带 `client` 的代理规则返回 400（4.2）。下载期间规则集的来源被改掉，或者之后又开始了一次下载，返回 409，这次结果丢弃。修改已生效但缓存没清干净时返回 500（4.7）。
 - 节点、组、Final、设置、`status`、`apply`（第 3 步实现，`rust/native-host/src/atom_proxy_api.rs`）：
-  - `GET nodes` 返回 `{version, nodes}`，每个节点带 `id`、`name`、`type`、`server`、`server_port`、完整的 `outbound` 和所在的组 `groups`。`POST nodes {format, content}` 导入，`content` 是字符串（`json` 格式也可以直接给 JSON 值），返回 201 和新节点。`PUT nodes/{id} {name?, outbound?}`，`DELETE nodes/{id}?version=N`。
+  - `GET nodes` 返回 `{version, nodes}`，每个节点带 `id`、`name`、`type`、`server`、`server_port`、去掉凭据的 `outbound`（5.1）和所在的组 `groups`。`POST nodes {format, content}` 导入，`content` 是字符串（`json` 格式也可以直接给 JSON 值），返回 201 和新节点。`PUT nodes/{id} {name?, format?, content?}`（`format` 和 `content` 要一起给，整体替换连接），`DELETE nodes/{id}?version=N`，`POST nodes/{id}/delay {url?, timeout?}` 返回 `{id, delay}`。
   - `GET groups` 的每个组带 `empty`、`builtin`，selector 带当前选中 `now`。`POST groups {name, type: selector|urltest, members, selected?, url?, interval?, tolerance?}` 新建，`PUT groups/{id}` 整组替换，`DELETE groups/{id}?confirm=true`（见 5.3），`POST groups/{id}/select {name}`，`POST groups/{id}/delay {url?, timeout?}`（毫秒，默认 5000）返回 `{delays: {成员: 毫秒}}`。
   - `GET final` 返回 `{version, members, selected, empty}`。`PUT final {members?, selected?}`：成员变了走应用事务；只改选中项走 Clash API。
   - `GET settings` 返回 `{version, fakeip_range, resolver, resolver_effective, mixed_port}`，`PUT settings` 改其中任意几项。

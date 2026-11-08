@@ -8,7 +8,7 @@ AtomDNS 决定域名走哪个出口，把结果放在发给 sing-box FakeIP DNS 
 
 - fork 目录：`sing-box/`（上游 `SagerNet/sing-box` 的 clone）
 - 分支：`atom/fakeip-outbound`，基于 tag `v1.14.4`（`c005f353`）
-- 改动：7 个文件，+196/-10，另有 3 个测试文件
+- 改动：8 个文件，另有 4 个测试文件
 
 | 文件 | 改动 |
 |---|---|
@@ -18,6 +18,7 @@ AtomDNS 决定域名走哪个出口，把结果放在发给 sing-box FakeIP DNS 
 | `dns/transport/fakeip/store.go` | 绑定读写转发到存储 |
 | `dns/transport/fakeip/memory.go` | 内存存储增加 `outboundCache`，`FakeIPReset` 一并清空 |
 | `experimental/cachefile/fakeip.go` | 新 bucket `fakeip_outbound`，`FakeIPReset` 一并删除 |
+| `cmd/sing-box/cmd_run.go` | 重载循环提成 `runLoop`；新配置启动失败时用上一份配置重建实例，进程不退出（见下文） |
 | `route/route.go` | 还原 FakeIP 时查绑定；有绑定时跳过 `route.rules`，TCP/UDP 严格按标签选出口，PreMatch 交回常规路径；`resolve` 动作解析出 FakeIP 时按域名查绑定（`resolvedToFakeIP`，见下文"代理入站"） |
 
 上游 v1.14.4 已经对 FakeIP transport 关闭了 DNS client 缓存（`dns/router.go` 中 `isFakeIP` 时 `DisableCache = true`），所以不需要 PR15 契约里对 `dns/client.go` 的改动。
@@ -53,6 +54,16 @@ AtomDNS 决定域名走哪个出口，把结果放在发给 sing-box FakeIP DNS 
 
 直接发来 IP 的连接不做 `resolve`，只匹配 IP 规则，没命中走 `route.final`。
 
+## 重载失败时保留服务（`cmd/sing-box/cmd_run.go`）
+
+上游的重载循环：收到 SIGHUP 先 `check`，通过后关掉旧实例，再按新配置创建；创建失败（端口被占用、出站初始化之类 `check` 发现不了的错误）就返回错误，进程退出。补丁把循环提成 `runLoop`，记住上一份成功运行过的配置：
+
+- 新配置创建失败：记一条 `reload service: ..., restoring the previous configuration`，用上一份配置重建实例，继续等信号。重建也失败才退出。
+- 重读配置文件失败：保留当前配置重新启动。
+- 第一次启动失败照旧退出（没有可退回的配置）。
+
+atom 用新的 Clash API 密钥确认重载，旧实例不认它，所以确认失败后 atom 照常写回旧文件、再重载一次，补丁只是让中间不断服务。
+
 ## 已验证
 
 在本机（macOS）运行 `go test`：
@@ -62,6 +73,7 @@ AtomDNS 决定域名走哪个出口，把结果放在发给 sing-box FakeIP DNS 
   - 未绑定时被拒；SET 后 TCP 和 UDP 都能通过，UDP 回包源地址是 FakeIP；CLEAR 后又被拒；绑定到不存在的出口时阻断。
   - 开启 cache file 后重启实例，不重新查 DNS，绑定仍然生效；CLEAR 后重启，仍保持清除状态。
 - `route/fakeip_mixed_test.go`：mixed 入站 + `resolve`，DNS 是一个模拟 AtomDNS 的测试服务（代理的域名转问 sing-box 的 FakeIP DNS 并带 SET/CLEAR，直连的域名给真实地址，屏蔽的给空应答），用连接 tracker 记录实际出口：代理 → 绑定的组、域名保留；没有绑定的 FakeIP → `route.final`；真实地址 → direct；空应答 → 连接失败；直接发 IP → `route.final`。
+- `cmd/sing-box/cmd_run_test.go`：用假的实例驱动 `runLoop`：重载到启动失败的配置后重建旧实例、进程不退出，下一次重载正常；重读失败时保留当前配置；第一次启动失败照旧返回错误。去掉重建那一段后第一个测试失败（反向验证）。
 - 反向验证：去掉 `route/route.go` 的改动后，上面三个端到端测试会失败（mixed 的测试单独做过：去掉 `resolvedToFakeIP` 后在"代理"那一步失败）。
 - `route/...`、`dns/...`、`experimental/cachefile/...`、`adapter/...`、`option/...` 原有测试全部通过，`go vet` 无告警。
 
