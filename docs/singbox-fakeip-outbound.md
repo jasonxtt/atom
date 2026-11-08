@@ -48,7 +48,8 @@ AtomDNS 决定域名走哪个出口，把结果放在发给 sing-box FakeIP DNS 
 
 浏览器经 mixed 入站发来的是域名，不经过 FakeIP 地址，补丁的第一部分管不到。atom 生成的路由规则先对 mixed 入站做 `resolve`（`server` 指向本机 AtomDNS，`disable_cache: true`），补丁在 `matchRule` 里 `resolve` 成功之后检查一次：
 
-- 解析出的地址全部属于 FakeIP 网段：说明 AtomDNS 决定代理，并且已经通过 FakeIP DNS 写好了绑定（AtomDNS 先问 sing-box 再回应答，没有时序问题）。补丁丢掉这些地址，目标保留域名，由代理服务器远端解析；按地址分配时的域名查绑定，有绑定走对应的组，没有走 `route.final`。之后的路由规则不再匹配。
+- 解析出的地址全部属于 FakeIP 网段：说明 AtomDNS 决定代理，并且已经通过 FakeIP DNS 写好了绑定（AtomDNS 先问 sing-box 再回应答，没有时序问题）。补丁丢掉这些地址，目标保留域名，由代理服务器远端解析；**按连接请求的域名**查绑定（查不到再试一次小写），有绑定走对应的组，没有走 `route.final`。之后的路由规则不再匹配。
+- 不用地址反查域名（codex 复审后改）：AtomDNS 从缓存里答的 FakeIP，在 sing-box 那边可能已经因为地址池循环分给了别的域名，或者映射已经丢了；反查会拿到别的域名的绑定，或者查不到。连接本来就带着目标域名，直接按它查，两种情况都不会出错：没绑定的域名就走 `route.final`，和 AtomDNS 的判断一致（代理规则的查询不经过 AtomDNS 缓存，每次都带 SET）。
 - 有真实地址：不处理，交给后面的路由规则（atom 生成的是"IP 规则 → 组，其余域名 → direct"）。
 - 空应答或 NXDOMAIN：上游 `resolve` 本来就报错（`empty result`），连接被拒，等于屏蔽。
 
@@ -59,6 +60,7 @@ AtomDNS 决定域名走哪个出口，把结果放在发给 sing-box FakeIP DNS 
 上游的重载循环：收到 SIGHUP 先 `check`，通过后关掉旧实例，再按新配置创建；创建失败（端口被占用、出站初始化之类 `check` 发现不了的错误）就返回错误，进程退出。补丁把循环提成 `runLoop`，记住上一份成功运行过的配置：
 
 - 新配置创建失败：记一条 `reload service: ..., restoring the previous configuration`，用上一份配置重建实例，继续等信号。重建也失败才退出。
+- 重建期间收到的 SIGHUP 不会打断重建（codex 复审后改）：`create` 在重建时只监听终止信号，SIGHUP 留在运行循环的信号队列里，重建完成后再按它重载一次；SIGINT/SIGTERM 照常中止。
 - 重读配置文件失败：保留当前配置重新启动。
 - 第一次启动失败照旧退出（没有可退回的配置）。
 
@@ -73,7 +75,8 @@ atom 用新的 Clash API 密钥确认重载，旧实例不认它，所以确认�
   - 未绑定时被拒；SET 后 TCP 和 UDP 都能通过，UDP 回包源地址是 FakeIP；CLEAR 后又被拒；绑定到不存在的出口时阻断。
   - 开启 cache file 后重启实例，不重新查 DNS，绑定仍然生效；CLEAR 后重启，仍保持清除状态。
 - `route/fakeip_mixed_test.go`：mixed 入站 + `resolve`，DNS 是一个模拟 AtomDNS 的测试服务（代理的域名转问 sing-box 的 FakeIP DNS 并带 SET/CLEAR，直连的域名给真实地址，屏蔽的给空应答），用连接 tracker 记录实际出口：代理 → 绑定的组、域名保留；没有绑定的 FakeIP → `route.final`；真实地址 → direct；空应答 → 连接失败；直接发 IP → `route.final`。
-- `cmd/sing-box/cmd_run_test.go`：用假的实例驱动 `runLoop`：重载到启动失败的配置后重建旧实例、进程不退出，下一次重载正常；重读失败时保留当前配置；第一次启动失败照旧返回错误。去掉重建那一段后第一个测试失败（反向验证）。
+- `cmd/sing-box/cmd_run_test.go`：用假的实例驱动 `runLoop`：重载到启动失败的配置后重建旧实例、进程不退出，下一次重载正常；重建期间到达的 SIGHUP 不打断重建、重建后再处理（假实例按真实 `create` 的行为：监听 SIGHUP 的启动会被取消）；重读失败时保留当前配置；第一次启动失败照旧返回错误。反向验证：去掉重建那一段、或者重建时也监听 SIGHUP，对应的测试失败。
+- `route/fakeip_mixed_test.go` 加了"缓存里的 FakeIP 已经属于另一个有绑定的域名"：按请求的域名查，走 `route.final`；改回反查后这一步拿到别的域名的出口，测试失败（反向验证）。
 - 反向验证：去掉 `route/route.go` 的改动后，上面三个端到端测试会失败（mixed 的测试单独做过：去掉 `resolvedToFakeIP` 后在"代理"那一步失败）。
 - `route/...`、`dns/...`、`experimental/cachefile/...`、`adapter/...`、`option/...` 原有测试全部通过，`go vet` 无告警。
 
@@ -84,6 +87,8 @@ atom 用新的 Clash API 密钥确认重载，旧实例不认它，所以确认�
 - 没有和 AtomDNS 联调。AtomDNS 侧的 EDNS 编码还没有实现。
 
 ## 已知限制
+
+- 改 FakeIP 网段的那次重载如果失败，旧映射找不回来：新实例启动时 `Store.Start()` 发现网段不同，会清空 cache file 里的 FakeIP 映射和绑定，之后新实例才因为别的原因（比如端口被占）启动失败；重建旧实例时映射已经没了，客户端手里的旧 FakeIP 会报 `missing fakeip record`，要等客户端重新查 DNS。不单独处理：就算换网段成功，旧映射一样会清空、旧 FakeIP 一样失效，改网段本身就是破坏性的操作。
 
 - 绑定只在收到 SET 或 CLEAR 时变化。FakeIP 地址池循环复用时，旧域名的绑定不会被清理：在内存里，或在 cache file 的 `fakeip_outbound` bucket 里。条目数受"带过绑定的不同域名数"限制。
 - sing-box 不校验标签格式，受信边界在 AtomDNS 侧：AtomDNS 要先剥离客户端自带的 65001 选项，再写入自己的指令。

@@ -195,7 +195,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 - 批量导入是全有或全无：任何一项转换失败就整体返回 400，错误里写"第 N 项"。导入的节点再经过整份配置的 `sing-box check`，不通过也整体不导入。
 - 节点类型限于代理协议（socks、http、shadowsocks、vmess、trojan、naive、wireguard、hysteria、shadowtls、vless、tuic、hysteria2、anytls、ssh、tor）；outbound 不能带 `tag`（由 atom 设为节点 ID）和 `detour`（链式代理暂不提供）。
 - 删除节点不需要确认：它从所有组和 Final 的成员里移除，组因此变空时按空组处理（5.2）。
-- **不回显凭据**（参考 PR15 后定）：接口返回的节点（列表、详情、导入和修改的结果）去掉所有层级里的 `password`、`username`、`user`、`uuid`、`auth`、`auth_str`、`private_key`、`private_key_passphrase`、`pre_shared_key`。修改节点时可以只改名称；要改连接参数，就重新给一条链接、YAML 或 JSON（`format` + `content`，只能是一个节点）整体替换，名称不变，除非同时给了 `name`。不给内容就保留原来的连接。凭据只存在 `webinfo/atom_proxy.json` 和 sing-box 的 `config.json` 里。
+- **不回显凭据**（参考 PR15 后定，codex 复审后对照 v1.14.4 的 option 定义补全）：接口返回的节点（列表、详情、导入和修改的结果）去掉所有层级里的 `password`、`username`、`user`、`uuid`、`auth`、`auth_str`、`private_key`、`private_key_passphrase`、`pre_shared_key`、TLS 的 `client_key`、REALITY 的 `short_id`（服务端只认它列出的 ID，算凭据；`public_key` 是公开的，保留），以及通用的 `key`、`psk`、`token`、`secret`；hysteria v1 字符串形式的 `obfs`（混淆密码）；`headers`、`extra_headers` 里的 `Authorization`、`Proxy-Authorization`、`Cookie`。导入时凭据字段原样保存，不去首尾空白。修改节点时可以只改名称；要改连接参数，就重新给一条链接、YAML 或 JSON（`format` + `content`，只能是一个节点）整体替换，名称不变，除非同时给了 `name`。不给内容就保留原来的连接。凭据只存在 `webinfo/atom_proxy.json` 和 sing-box 的 `config.json` 里。
 - **单节点测速**：`POST nodes/{id}/delay` 走 Clash API `GET /proxies/{id}/delay`，和组测速一样，`url` 可选、超时默认 5000 毫秒、限制在 100 到 30000 毫秒之间。
 
 ### 5.2 节点组
@@ -219,7 +219,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 - **持久化**：`webinfo/atom_proxy.json`，内容是 `{version, nodes, groups, final, settings}`，一个版本号，写入时比较，版本不对返回 409（带当前 `version`），做法和规则表一样。文件不存在时是新安装的状态（空的"默认代理"、Final 选中它），第一次修改才写文件；文件读不了、解析不了或校验不过时程序不启动。**[定]**
 - **ID**：节点 `n-` + 8 位十六进制，组 `g-` + 8 位十六进制，内置组 `g-default`，Final 的标签是 `final`。规则可以代理到 `final`（删除组时规则改用它）。
 - **组**：`selector` 有 `selected`（空表示第一个成员）；`urltest` 有 `url`、`interval`、`tolerance`，新建时不填就用默认值 `https://www.gstatic.com/generate_204`、`3m`、`50`。`interval` 只接受秒、分、时（`30s`、`3m`、`1h30m`）。成员必须存在、不重复、不能是自己；组之间有环时拒绝并写出环。
-- **选择和测速**：`POST groups/{id}/select`（`id` 可以是 `final`）走 Clash API `PUT /proxies/{tag}`，不重载；atom 记下选中项，生成配置时作为 `default`。运行中的配置文件和当前状态一致时，同时把文件里的 `default` 改掉（同一个密钥，不重载），所以 `status` 仍然是一致的。urltest 组不能手动选。`POST groups/{id}/delay` 走 Clash API `GET /group/{tag}/delay`。
+- **选择和测速**：`POST groups/{id}/select`（`id` 可以是 `final`）走 Clash API `PUT /proxies/{tag}`，不重载；先切 Clash 里的选择，再保存，保存失败就把选择和配置文件都改回原来的（codex 复审后加）；atom 记下选中项，生成配置时作为 `default`。运行中的配置文件和当前状态一致时，同时把文件里的 `default` 改掉（同一个密钥，不重载），所以 `status` 仍然是一致的。urltest 组不能手动选。`POST groups/{id}/delay` 走 Clash API `GET /group/{tag}/delay`。
 - **删除组**：被规则引用时返回 409 和这些规则的 ID；带 `confirm=true` 再删，这些规则改成代理到 `final`，规则表版本加 1，并清空缓存。其他组和 Final 的成员里同时去掉它；Final 选中的正是它时，回到"默认代理"（不在成员里就选第一个）。
 - **改名不重载**：名称不在 sing-box 配置里。每次修改都会生成一遍配置，和运行中的文件（用它自己的密钥）比较，一样就不应用。
 
@@ -257,11 +257,14 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 - **位置**：配置和 `cache.db` 放在 atom 配置根下的 `sing-box/`。程序路径、工作目录、重载命令、Clash API 地址（`127.0.0.1:9090`）、FakeIP DNS 入站（`127.0.0.1:6666`）、本机 AtomDNS 地址（`127.0.0.1:53`）、redirect 7892 / tproxy 7893、默认 resolver 来自哪个上游组（`domestic`）写在自带 YAML 里 `atom_rules` 插件的 `singbox` 段，不对用户开放。
 - **重载失败不退出**（参考 PR15 后定，sing-box 补丁）：上游 v1.14.4 收到 SIGHUP 后先关掉旧实例；新配置如果通过了 `check` 却启动失败（端口被占用这类运行期错误），进程会直接退出，要等 atom 回滚、systemd 重启，中间代理和国外 DNS 都断。补丁让 `cmd_run.go` 记住上一份成功运行过的配置，新实例启动失败时用它在内存里把旧实例重建出来，进程不退出。atom 这边不用改：旧实例不认新密钥，确认照样失败，atom 写回旧文件再重载一次，最后运行的还是旧配置。
 - **确认新配置生效**：每次应用都生成新的随机 Clash API 密钥写进配置。旧实例不认新密钥，所以用新密钥在 20 秒内拿到 `/proxies`（里面有 `final`）就证明新配置已经在跑。代价：本机接了第三方 Clash 面板的话，每次应用后要重新填密钥（Clash API 只监听 127.0.0.1）。
-- **事务**：校验（规则表和节点状态）→ 生成 → 和运行中的文件比较，一样就跳过 → `sing-box check`（配置先写到 `config.json.next`；不通过返回 400，什么都不动）→ 改名为 `config.json` → 重载 → 确认 → 写 atom 的文件 → 生效。重载或确认失败：写回旧文件（之前没有就删掉），再重载一次并用旧密钥确认，接口返回 502，错误里写回滚结果；atom 的状态和文件都不变。sing-box 已经应用但写 atom 文件失败：同样回滚 sing-box，返回 500。一次应用进行时，其他写操作返回 409（不排队）；整个进程同一时间只有一次应用。找不到 sing-box 程序时不写任何文件，直接报错。
+- **选择要同步**（codex 复审后加）：sing-box 的 selector 启动时先用 `cache.db` 里记住的选择，再看 `default`。所以每次重载并确认后，atom 用 Clash API 把每个有成员的 selector 组和 Final 切到 atom 记录的选择；同步失败按应用失败处理（回滚）。回滚时旧实例也按旧状态重新同步一遍。
+- **事务**：校验（规则表和节点状态）→ 生成 → 和运行中的文件比较，一样就跳过 → `sing-box check`（配置先写到 `config.json.next`；不通过返回 400，什么都不动）→ 改名为 `config.json` → 重载 → 确认 → 写 atom 的文件 → 生效。重载或确认失败：写回旧文件（之前没有就删掉），再重载一次并用旧密钥确认，接口返回 502，错误里写回滚结果；atom 的状态和文件都不变。sing-box 已经应用但写 atom 文件失败：同样回滚 sing-box，返回 500。一次应用进行时，其他写操作返回 409（不排队）；整个进程同一时间只有一次应用。这两层保护（进程级的应用锁和规则表持有者的 busy 标记）一直持有到 atom 的文件写完；写文件失败时，回滚 sing-box 也在保护之内完成，不会把别人刚应用成功的配置改回去（codex 复审后改）。找不到 sing-box 程序时不写任何文件，直接报错。
+- **两个文件的写入顺序**（codex 复审后改）：只有确认删除组会同时改规则和节点状态。先写规则（引用改成 Final），再写去掉该组的 `atom_proxy.json`；两次写之间崩溃，留下的只是一个没被引用的组，下次照常启动。第二次写失败时把规则文件写回原样，写回也失败就在错误里说明。
+- **凭据文件权限**：`webinfo/atom_proxy.json` 和 sing-box 的 `config.json`（含 `config.json.next` 和写入时的临时文件）都以 0600 写入。
 - **启动时**（包括 AtomDNS 每次重新加载配置后）：生成一遍配置，和运行中的文件比较；不一致（第一次启动、升级后生成规则变了、默认 resolver 跟着国内上游变了）就应用一次；失败只记日志和 `status`，不影响 DNS。
 - **生成的内容**（对应上表）：`inbounds` 的 redirect/tproxy/mixed 监听 `0.0.0.0`；`dns.servers` 是 `fakeip`、`resolver`、`atomdns`（mixed 入站 `resolve` 用），`dns.rules` 把 A/AAAA 交给 `fakeip`，`dns.final` 是 `resolver`；`route.default_domain_resolver` 是 `resolver`，节点域名不会走 FakeIP；路由规则依次是 `dns-in` → `hijack-dns`、`mixed-in` → `resolve`（`server: atomdns`、`disable_cache: true`）、IP 规则（4.6）、`mixed-in` 且目标是域名（`domain_regex: ["."]`）→ `direct`；`route.final` 是 `final`；出口依次是节点、组、Final、`direct`、`block`。
 - **resolver**：设置里留空时，用 `singbox.resolver_group` 那个上游组里第一个启用的 `udp://`/`tcp://` 地址条目，没有就用第一个带 `dial_addr` 的条目（`udp://dial_addr`），再没有用 `udp://223.5.5.5`。用户指定时只接受 IP、`udp://IP[:端口]`、`tcp://IP[:端口]`（域名本身还要解析）。
-- **设置**（`settings`）：`fakeip_range`（IPv4 网段，前缀 8 到 24，主机位为 0，不能是回环）、`resolver`、`mixed_port`（不能和 atom 的其他端口冲突）。改 FakeIP 网段后清空 AtomDNS 的缓存（旧网段的 FakeIP 应答）。改 mixed 端口后，如果 AtomDNS 的 `main_proxy` 正指向 `127.0.0.1:<旧端口>`，就把它改成新端口（写 `webinfo/settings.json` 并重新加载 AtomDNS 配置）；指向别的地址时不动。
+- **设置**（`settings`）：`fakeip_range`（IPv4 网段，前缀 8 到 24，主机位为 0，不能是回环；注意改网段会让 sing-box 清空已有的 FakeIP 映射和绑定，客户端缓存里的旧 FakeIP 失效，要等客户端重新查 DNS；这次重载如果失败，回滚到旧配置也找不回原来的映射，见 [singbox-fakeip-outbound.md](singbox-fakeip-outbound.md) 的已知限制）、`resolver`、`mixed_port`（不能和 atom 的其他端口冲突）。改 FakeIP 网段后清空 AtomDNS 的缓存（旧网段的 FakeIP 应答）。改 mixed 端口后，如果 AtomDNS 的 `main_proxy` 正指向 `127.0.0.1:<旧端口>`，就把它改成新端口（写 `webinfo/settings.json` 并重新加载 AtomDNS 配置）；指向别的地址时不动。
 - **7890 的 sing-box 补丁**：`resolve` 解析出的地址全部属于 FakeIP 时，按地址对应的域名查绑定，有就走绑定的组，没有就走 `route.final`；地址被丢掉，目标保留域名。见 [singbox-fakeip-outbound.md](singbox-fakeip-outbound.md) 的"代理入站"。
 
 ## 7. 锁定与开放
