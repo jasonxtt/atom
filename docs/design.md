@@ -1,6 +1,6 @@
 # atom 设计文档 v0
 
-状态：v0 已审，第 12 节的问题已答复；第 2 步实现时新定的事项写回了第 3、4、8 节。日期：2026-11-08。
+状态：v0 已审，第 12 节的问题已答复；第 2 步实现时新定的事项写回了第 3、4、8 节，第 3 步的写回了第 4.6、5、6、8 节。日期：2026-11-08。
 
 标记说明：**[定]** 表示已经和用户确认；**[建议]** 是我的提议，等审阅；**[待定]** 表示还要讨论。
 
@@ -148,6 +148,14 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 
 目标是 IP 的规则不经过 DNS，AtomDNS 处理不了。控制面把它们编译成 sing-box 的 `ip_cidr` 路由规则，同时让 nft 把这些网段导进 sing-box。这是唯一一类在 sing-box 里匹配的规则。**[建议]**
 
+第 3 步定下的 **[定]**：
+
+- 带 `ip_cidr` 的规则只能单独用，不能再带域名或 `client` 条件（否则 400）。动作可以是代理、直连、屏蔽。
+- AtomDNS 的 DNS 匹配跳过它们（`rules/test` 也不会命中）。启用的 IP 规则按规则表里的顺序编译成 sing-box 路由规则，排在 mixed 入站的 `resolve` 之后：代理 → `route` 到组，直连 → `route` 到 `direct`，屏蔽 → `reject`。网段写回规范形式（主机位清零）。
+- 改动规则时，如果启用的 IP 规则（网段、动作、顺序）有变化，就走一遍 sing-box 应用事务（第 6 节），应用失败时规则的改动也不保存。只改域名规则不碰 sing-box。
+- nft 部分（第 4、7 步）：`GET status` 的 `nft` 给出 FakeIP 网段和 IP 规则网段（分 inet4/inet6），安装器和联调按它生成 nft 规则。
+- 没有配置 `singbox` 段时（比如测试配置），`ip_cidr` 规则仍然返回 400。
+
 ### 4.7 实现（第 2 步）
 
 - **插件**：`atom_rules`（`rust/native-host/src/atom_rules.rs`，配置在 `atomdns/config/sub_config/atom_rules.yaml`）。它是一个 fixture，只给查询打动作标记：屏蔽 fast_mark 40、代理 41、直连 42；代理时另外把组写进 `ExecutionState::outbound`。主流程按标记分派，所以执行顺序仍写在 YAML 里。匹配复用 `matcher-core`：域名条件用 `MixSet`（full/domain 用排序池，regex、keyword 照旧），客户端用 `IpPrefixList`。规则逐条按顺序判断，第一条命中的生效。
@@ -167,8 +175,9 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 - **规则集列表文件**（codex 复审后改）：每个规则集有一个 `revision`，列表内容存在 `webinfo/atom_rulesets/<id>-<revision>.txt`。每次换列表（本地编辑、下载成功）都写一个新 revision 的文件，然后写 `atom_rulesets.json`，这一步是唯一的切换点。写元数据失败时删掉新文件，旧列表和旧元数据都还在，重启后还是旧的；成功后删掉旧文件。`revision` 为 0 表示还没有列表（远程规则集还没下载成功过，包括第一次下载失败），内容为空，也没有文件。`revision` 不为 0 而文件不存在时，按读不了处理，程序不启动。本地规则集新建时 `revision` 就是 1，所以加载时遇到本地规则集 `revision` 为 0，或者 `revision` 为 0 但 `rule_count` 不为 0，也当作状态不一致，程序不启动，不会悄悄变成空规则集。**[定]** 不为第 2 步早期没有 `revision`、文件名是 `<id>.txt` 的格式写迁移：那个格式没发布过，也没人在用；它的元数据缺 `revision`，会被上面的检查拒绝。 进程如果恰好在写完元数据、删旧文件之前退出，会留下一个没人引用的旧文件，不影响结果，目前不自动清理。
 - **并发下载**：每次下载开始时领一个编号（只在内存里），并记下当时的来源（url、format、category）。下载完要写入前核对两样：编号还是这个规则集最新开始的那一次，来源也没被改掉。任何一样不对，就丢弃这次结果（成功和失败都不记录），返回 409。所以两次刷新重叠时，只有后开始的那次能写入，先开始、后结束的那次不会用旧内容覆盖新内容，也不会把成功状态改成 `last_error`。**[定]**
 - **清缓存失败**：清空某个缓存时，如果写空的缓存文件失败（比如磁盘满），改为直接丢弃：先清内存，再删掉缓存文件，免得重启后又读回旧条目。丢弃也失败（文件删不掉）时，接口返回 500，说明修改已经保存并生效，但缓存没清干净。
-- **group_id**：组到第 3 步才有，现在只校验格式：非空、没有首尾空白和控制字符、最长 64 字节。`atom_rules.rs` 的 `validate_group` 是以后检查"组存在"的位置。
-- **ip_cidr**：API 先拒绝，第 3 步和 sing-box 配置生成一起做（4.6）。
+- **group_id**（第 2 步）：校验格式：非空、没有首尾空白和控制字符、最长 64 字节。没有 `singbox` 段时只做这一项。
+- **ip_cidr**：第 3 步实现，见 4.6。
+- **group_id**（第 3 步）：配置了 `singbox` 段时，代理规则的 `group_id` 必须是存在的节点组或 `final`（Final），否则 400；加载时文件里引用了不存在的组同样按文件损坏处理。
 
 ## 5. 节点与节点组
 
@@ -178,13 +187,22 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 - 统一转换成 sing-box outbound 后保存。保存前用 `sing-box check` 校验整份生成的配置。**[建议]**
 - 分享链接的解析在 atom 的 Rust 代码里实现。**[建议]**
 
+第 3 步定下的 **[定]**：
+
+- 分享链接第一版支持 7 种：`vless://`（含 reality、ws、grpc、httpupgrade、h2）、`vmess://`（V2RayN 的 base64 JSON）、`trojan://`、`ss://`（SIP002、明文 userinfo 的 2022 写法、旧的整段 base64 写法；插件支持 obfs-local、v2ray-plugin）、`hysteria2://`/`hy2://`、`tuic://`、`anytls://`。其他协议先用 sing-box JSON 导入。
+- "YAML"指 Clash/mihomo 的 `proxies`：整份 Clash 配置、`proxies` 列表或单个节点都行，协议范围和分享链接一样，和链接共用一套转换。
+- sing-box JSON：单个 outbound、数组，或整份 sing-box 配置（只取代理类型的 outbound，跳过 direct、selector 等）。`tag` 当作节点名称。
+- 批量导入是全有或全无：任何一项转换失败就整体返回 400，错误里写"第 N 项"。导入的节点再经过整份配置的 `sing-box check`，不通过也整体不导入。
+- 节点类型限于代理协议（socks、http、shadowsocks、vmess、trojan、naive、wireguard、hysteria、shadowtls、vless、tuic、hysteria2、anytls、ssh、tor）；outbound 不能带 `tag`（由 atom 设为节点 ID）和 `detour`（链式代理暂不提供）。
+- 删除节点不需要确认：它从所有组和 Final 的成员里移除，组因此变空时按空组处理（5.2）。
+
 ### 5.2 节点组
 
 已定：
 
 - 类型先做 `selector` 和 `urltest`，接 mihomo 时再加 fallback 等。**[定]**
-- **"默认代理"是内置组，不能删除**，至少要有一个节点。**[定]**
-- **Final** 是兜底，由原判断的"国外"结果和所有没绑定的 FakeIP 流量使用。它只能引用一个节点组，默认是"默认代理"，**不能设成 direct**，由 API 校验强制。**[定]**
+- **"默认代理"是内置组，不能删除**（ID `g-default`）。**[定]** 刚装好时它没有节点（第 3 步定）：组允许为空，生成配置时空组里放一个隐藏的 `block` 出口，这个组的流量全部拒绝，不会悄悄直连；`status` 的 `warnings.empty_groups` 和组列表的 `empty` 给出提醒。**[定]**
+- **Final** 是兜底，由原判断的"国外"结果和所有没绑定的 FakeIP 流量使用，**不能设成 direct**，由 API 校验强制。**[定]** 第 3 步统一的说法：Final 是一个 selector，成员默认是所有节点组，新建的组自动加入；用户可以删减组，也可以加节点；成员里不能有 direct；同时只能选中一个成员，默认选中"默认代理"。**[定]**
 - 节点和组在 sing-box 里的标签用不可变的内部 ID（如 `n-1a2b`、`g-7f3a`），名称只用于显示。这样改名不会让已有绑定失效。代价是第三方 Clash 面板里看到的是 ID。**[定]**
 
 - **Final 做成 selector**，成员是节点组，默认选中"默认代理"。运行时通过 Clash API 切换，不用重载。`route.final` 指向这个 selector。**[定]**
@@ -193,7 +211,17 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 - **删除被规则引用的组**：API 先返回 409 和引用它的规则列表；UI 弹出确认，用户确认后带 `confirm=true` 再删一次，那些规则的动作自动改成 Final。嵌套引用了它的组，同样从成员里移除。**[定]**
 - **切换后端（sing-box ↔ mihomo）**：selector 保持不变；sing-box 不支持的类型（fallback、load-balance 等）一律提示用户，并自动转换成 urltest。**[定]**
 
-## 6. sing-box 配置生成 **[建议]**
+### 5.3 实现（第 3 步）
+
+- **模块**（`atomdns/rust/native-host/src/`）：`atom_proxy.rs` 模型、校验、环检测；`atom_links.rs` 分享链接和 Clash YAML；`atom_singbox.rs` 生成配置、check、写入、重载、确认、回滚和 Clash API；`atom_rules/singbox.rs` 规则表持有者上的事务；`atom_proxy_api.rs` 接口。**[定]**
+- **持久化**：`webinfo/atom_proxy.json`，内容是 `{version, nodes, groups, final, settings}`，一个版本号，写入时比较，版本不对返回 409（带当前 `version`），做法和规则表一样。文件不存在时是新安装的状态（空的"默认代理"、Final 选中它），第一次修改才写文件；文件读不了、解析不了或校验不过时程序不启动。**[定]**
+- **ID**：节点 `n-` + 8 位十六进制，组 `g-` + 8 位十六进制，内置组 `g-default`，Final 的标签是 `final`。规则可以代理到 `final`（删除组时规则改用它）。
+- **组**：`selector` 有 `selected`（空表示第一个成员）；`urltest` 有 `url`、`interval`、`tolerance`，新建时不填就用默认值 `https://www.gstatic.com/generate_204`、`3m`、`50`。`interval` 只接受秒、分、时（`30s`、`3m`、`1h30m`）。成员必须存在、不重复、不能是自己；组之间有环时拒绝并写出环。
+- **选择和测速**：`POST groups/{id}/select`（`id` 可以是 `final`）走 Clash API `PUT /proxies/{tag}`，不重载；atom 记下选中项，生成配置时作为 `default`。运行中的配置文件和当前状态一致时，同时把文件里的 `default` 改掉（同一个密钥，不重载），所以 `status` 仍然是一致的。urltest 组不能手动选。`POST groups/{id}/delay` 走 Clash API `GET /group/{tag}/delay`。
+- **删除组**：被规则引用时返回 409 和这些规则的 ID；带 `confirm=true` 再删，这些规则改成代理到 `final`，规则表版本加 1，并清空缓存。其他组和 Final 的成员里同时去掉它；Final 选中的正是它时，回到"默认代理"（不在成员里就选第一个）。
+- **改名不重载**：名称不在 sing-box 配置里。每次修改都会生成一遍配置，和运行中的文件（用它自己的密钥）比较，一样就不应用。
+
+## 6. sing-box 配置生成 **[定]**
 
 控制面完整生成 sing-box 的配置文件，用户不手改（和 PR15 的"部分接管"不同）。
 
@@ -220,6 +248,18 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
   限制：每个新连接多一次本机 DNS 查询，只针对 7890 流量；AtomDNS 看到的查询来源都是 127.0.0.1，所以带"来源客户端"条件的规则对 7890 流量无效；7890 直接发来 IP 的连接，只匹配 IP 规则，没命中就走 Final。
 - **应用流程**：生成 → `sing-box check` → 原子写入 → 发 SIGHUP 让 sing-box 重新加载 → 通过 Clash API 确认新实例起来了；失败就写回旧配置再重载一次。sing-box v1.14.4 的 `cmd_run.go` 收到 SIGHUP 会重新加载配置。
 - 切换节点和测速走 Clash API，不需要重载。
+
+第 3 步定下和实现的 **[定]**：
+
+- **进程管理**：sing-box 跑在独立的 systemd 单元 `atom-sing-box.service` 里（单元文件由第 7 步的安装器写，`ExecReload=kill -HUP $MAINPID`，`Restart=on-failure`）。atom 写完配置后执行 `systemctl reload-or-restart atom-sing-box.service`：单元在运行就发 SIGHUP，没在运行（第一次）就启动它。sing-box 崩了由 systemd 拉起，atom 重启不影响代理。
+- **位置**：配置和 `cache.db` 放在 atom 配置根下的 `sing-box/`。程序路径、工作目录、重载命令、Clash API 地址（`127.0.0.1:9090`）、FakeIP DNS 入站（`127.0.0.1:6666`）、本机 AtomDNS 地址（`127.0.0.1:53`）、redirect 7892 / tproxy 7893、默认 resolver 来自哪个上游组（`domestic`）写在自带 YAML 里 `atom_rules` 插件的 `singbox` 段，不对用户开放。
+- **确认新配置生效**：每次应用都生成新的随机 Clash API 密钥写进配置。旧实例不认新密钥，所以用新密钥在 20 秒内拿到 `/proxies`（里面有 `final`）就证明新配置已经在跑。代价：本机接了第三方 Clash 面板的话，每次应用后要重新填密钥（Clash API 只监听 127.0.0.1）。
+- **事务**：校验（规则表和节点状态）→ 生成 → 和运行中的文件比较，一样就跳过 → `sing-box check`（配置先写到 `config.json.next`；不通过返回 400，什么都不动）→ 改名为 `config.json` → 重载 → 确认 → 写 atom 的文件 → 生效。重载或确认失败：写回旧文件（之前没有就删掉），再重载一次并用旧密钥确认，接口返回 502，错误里写回滚结果；atom 的状态和文件都不变。sing-box 已经应用但写 atom 文件失败：同样回滚 sing-box，返回 500。一次应用进行时，其他写操作返回 409（不排队）；整个进程同一时间只有一次应用。找不到 sing-box 程序时不写任何文件，直接报错。
+- **启动时**（包括 AtomDNS 每次重新加载配置后）：生成一遍配置，和运行中的文件比较；不一致（第一次启动、升级后生成规则变了、默认 resolver 跟着国内上游变了）就应用一次；失败只记日志和 `status`，不影响 DNS。
+- **生成的内容**（对应上表）：`inbounds` 的 redirect/tproxy/mixed 监听 `0.0.0.0`；`dns.servers` 是 `fakeip`、`resolver`、`atomdns`（mixed 入站 `resolve` 用），`dns.rules` 把 A/AAAA 交给 `fakeip`，`dns.final` 是 `resolver`；`route.default_domain_resolver` 是 `resolver`，节点域名不会走 FakeIP；路由规则依次是 `dns-in` → `hijack-dns`、`mixed-in` → `resolve`（`server: atomdns`、`disable_cache: true`）、IP 规则（4.6）、`mixed-in` 且目标是域名（`domain_regex: ["."]`）→ `direct`；`route.final` 是 `final`；出口依次是节点、组、Final、`direct`、`block`。
+- **resolver**：设置里留空时，用 `singbox.resolver_group` 那个上游组里第一个启用的 `udp://`/`tcp://` 地址条目，没有就用第一个带 `dial_addr` 的条目（`udp://dial_addr`），再没有用 `udp://223.5.5.5`。用户指定时只接受 IP、`udp://IP[:端口]`、`tcp://IP[:端口]`（域名本身还要解析）。
+- **设置**（`settings`）：`fakeip_range`（IPv4 网段，前缀 8 到 24，主机位为 0，不能是回环）、`resolver`、`mixed_port`（不能和 atom 的其他端口冲突）。改 FakeIP 网段后清空 AtomDNS 的缓存（旧网段的 FakeIP 应答）。改 mixed 端口后，如果 AtomDNS 的 `main_proxy` 正指向 `127.0.0.1:<旧端口>`，就把它改成新端口（写 `webinfo/settings.json` 并重新加载 AtomDNS 配置）；指向别的地址时不动。
+- **7890 的 sing-box 补丁**：`resolve` 解析出的地址全部属于 FakeIP 时，按地址对应的域名查绑定，有就走绑定的组，没有就走 `route.final`；地址被丢掉，目标保留域名。见 [singbox-fakeip-outbound.md](singbox-fakeip-outbound.md) 的"代理入站"。
 
 ## 7. 锁定与开放
 
@@ -261,7 +301,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 | `rulesets` | 列表、新建（内置 geosite / 远程 URL / 本地列表）、刷新远程、删除 |
 | `nodes` | 列表、导入（`format: json|yaml|link`，可以批量）、修改、删除 |
 | `groups` | 列表、新建、修改、删除（"默认代理"不可删）、`POST groups/{id}/select`、`POST groups/{id}/delay` |
-| `final` | 读取、设置（只能指向一个组） |
+| `final` | 读取、设置（成员和选中项，选中项只能是一个） |
 | `settings` | 读取、修改 7.2 里开放的项 |
 | `status` | 两个进程的版本、运行状态、最近一次应用 sing-box 配置的结果 |
 | `apply` | 查询最近一次变更的应用结果（见下） |
@@ -275,6 +315,14 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
   - `GET rulesets` 列出内置集合（`type: builtin`）和自定义规则集；`GET rulesets/{id}` 带上列表内容。`POST rulesets` 的请求体是 `{name, type: remote, url, format?, category?}` 或 `{name, type: local, rules}`。`PUT rulesets/{id}` 改名、改地址或替换本地列表。`DELETE rulesets/{id}` 删除。`POST rulesets/{id}/refresh` 重新下载。
   - 错误体都是 AtomDNS 现有的 `{"error": "..."}`。写操作和 `rulesets` 的下载都占用管理租约，和设置、配置重载互斥（租约只防配置重载，不让写操作排队）。
   - 带 `client` 的代理规则返回 400（4.2）。下载期间规则集的来源被改掉，或者之后又开始了一次下载，返回 409，这次结果丢弃。修改已生效但缓存没清干净时返回 500（4.7）。
+- 节点、组、Final、设置、`status`、`apply`（第 3 步实现，`rust/native-host/src/atom_proxy_api.rs`）：
+  - `GET nodes` 返回 `{version, nodes}`，每个节点带 `id`、`name`、`type`、`server`、`server_port`、完整的 `outbound` 和所在的组 `groups`。`POST nodes {format, content}` 导入，`content` 是字符串（`json` 格式也可以直接给 JSON 值），返回 201 和新节点。`PUT nodes/{id} {name?, outbound?}`，`DELETE nodes/{id}?version=N`。
+  - `GET groups` 的每个组带 `empty`、`builtin`，selector 带当前选中 `now`。`POST groups {name, type: selector|urltest, members, selected?, url?, interval?, tolerance?}` 新建，`PUT groups/{id}` 整组替换，`DELETE groups/{id}?confirm=true`（见 5.3），`POST groups/{id}/select {name}`，`POST groups/{id}/delay {url?, timeout?}`（毫秒，默认 5000）返回 `{delays: {成员: 毫秒}}`。
+  - `GET final` 返回 `{version, members, selected, empty}`。`PUT final {members?, selected?}`：成员变了走应用事务；只改选中项走 Clash API。
+  - `GET settings` 返回 `{version, fakeip_range, resolver, resolver_effective, mixed_port}`，`PUT settings` 改其中任意几项。
+  - `GET status`：`atomdns.version`；`singbox.running`、`version`（Clash API 的 `/version`）、`in_sync`（运行中的文件是否就是当前状态生成的）、`host`；`last_apply`；`warnings.empty_groups`；`nft`（4.6）。`GET apply` 返回 `last_apply` 和 `in_sync`，`POST apply` 用新密钥重新应用一次。`last_apply` 是 `{at, trigger, ok, changed, error?}`，`trigger` 是 `nodes`、`groups`、`final`、`settings`、`rules`、`apply`、`startup` 之一，在进程内跨配置重载保留。
+  - 写操作都可以带 `version`（请求体，DELETE 用 `?version=`），和节点状态的版本比较。sing-box check 不通过 400，重载或确认失败 502（已回滚），一次应用进行中 409。
+  - 写操作占用管理租约，`PUT settings` 例外：它自己拿租约，只覆盖 sing-box 的部分，因为改 mixed 端口要重新加载 AtomDNS 配置，而重新加载要等所有租约结束。
 - 错误格式沿用 AtomDNS 现有的格式。**[定]**
 - 暂不做鉴权。**[定]**
 
@@ -322,7 +370,7 @@ atom/
 
 1. **AtomDNS fork 打底**（已完成）：从 main 建分支；锁定 7.1 里的项，删除 RealIP、专属分流组和在线更新；加上 EDNS0 65001 编码，Final 路径发 CLEAR。验收：沿用现有名单，链路能跑通，FakeIP 带上 CLEAR。
 2. **规则表**（已完成，实现见 4.7）：模型、首条命中匹配插件、`rules` API、拖动、`rules/test`；规则命中"代理"时发 SET。另外做了 `ruleset` 条件的全部三种来源（内置、远程 URL、本地列表）和 `rulesets` API。**[定]** 还没做：远程规则集的定时自动更新（现在只能手动 `refresh`）。
-3. **sing-box 配置生成**：节点导入（JSON/YAML/链接）、节点组、Final、事务式应用和回滚；7890 按规则分流，包括 sing-box 补丁里 resolve 之后查绑定的那一处。
+3. **sing-box 配置生成**（已完成，实现见 4.6、5.3、第 6 节）：节点导入（JSON/YAML/链接）、节点组、Final、事务式应用和回滚；7890 按规则分流，包括 sing-box 补丁里 resolve 之后查绑定的那一处。还没做：nft 规则（第 4、7 步）、systemd 单元文件（第 7 步）。
 4. **联调**：在测试机上组装 VM 环境，配好 nft，做端到端验证（TCP/UDP、拖动后立即生效、重启后恢复）。
 5. **绑定账本和缓存失效**（4.5）。
 6. **简易 WebUI + OpenAPI 规范定稿**。
