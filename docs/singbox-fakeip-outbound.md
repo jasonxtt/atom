@@ -61,6 +61,7 @@ AtomDNS 决定域名走哪个出口，把结果放在发给 sing-box FakeIP DNS 
 
 - 新配置创建失败：记一条 `reload service: ..., restoring the previous configuration`，用上一份配置重建实例，继续等信号。重建也失败才退出。
 - 重建期间收到的 SIGHUP 不会打断重建（codex 复审后改）：`create` 在重建时只监听终止信号，SIGHUP 留在运行循环的信号队列里，重建完成后再按它重载一次；SIGINT/SIGTERM 照常中止。
+- 终止信号不会丢（codex 第二次复审后改）：运行循环的信号通道只有一个位置，排队的 SIGHUP 占住它以后，之后来的 SIGTERM 会被丢掉。所以 `create` 在构造实例**之前**就开始监听终止信号，并记下构造或启动期间是否收到过；收到过就返回 `errStopped`（即使启动本身没有因为 context 取消而失败，也会关掉实例），运行循环见到它就正常退出，不再执行排队的重载。
 - 重读配置文件失败：保留当前配置重新启动。
 - 第一次启动失败照旧退出（没有可退回的配置）。
 
@@ -75,7 +76,7 @@ atom 用新的 Clash API 密钥确认重载，旧实例不认它，所以确认�
   - 未绑定时被拒；SET 后 TCP 和 UDP 都能通过，UDP 回包源地址是 FakeIP；CLEAR 后又被拒；绑定到不存在的出口时阻断。
   - 开启 cache file 后重启实例，不重新查 DNS，绑定仍然生效；CLEAR 后重启，仍保持清除状态。
 - `route/fakeip_mixed_test.go`：mixed 入站 + `resolve`，DNS 是一个模拟 AtomDNS 的测试服务（代理的域名转问 sing-box 的 FakeIP DNS 并带 SET/CLEAR，直连的域名给真实地址，屏蔽的给空应答），用连接 tracker 记录实际出口：代理 → 绑定的组、域名保留；没有绑定的 FakeIP → `route.final`；真实地址 → direct；空应答 → 连接失败；直接发 IP → `route.final`。
-- `cmd/sing-box/cmd_run_test.go`：用假的实例驱动 `runLoop`：重载到启动失败的配置后重建旧实例、进程不退出，下一次重载正常；重建期间到达的 SIGHUP 不打断重建、重建后再处理（假实例按真实 `create` 的行为：监听 SIGHUP 的启动会被取消）；重读失败时保留当前配置；第一次启动失败照旧返回错误。反向验证：去掉重建那一段、或者重建时也监听 SIGHUP，对应的测试失败。
+- `cmd/sing-box/cmd_run_test.go`：用假的实例驱动 `runLoop`：重载到启动失败的配置后重建旧实例、进程不退出，下一次重载正常；重建期间到达的 SIGHUP 不打断重建、重建后再处理（假实例按真实 `create` 的行为：监听 SIGHUP 的启动会被取消）；重建期间又来了终止信号时正常退出、不执行排队的重载；另有一个调用真实 `create` 的测试：运行循环的通道已被 SIGHUP 占满，在构造实例前给自己发 SIGTERM，`create` 返回 `errStopped`；重读失败时保留当前配置；第一次启动失败照旧返回错误。反向验证：去掉重建那一段、重建时也监听 SIGHUP、把信号监听挪回构造实例之后、或者不检查 `errStopped`，对应的测试失败。
 - `route/fakeip_mixed_test.go` 加了"缓存里的 FakeIP 已经属于另一个有绑定的域名"：按请求的域名查，走 `route.final`；改回反查后这一步拿到别的域名的出口，测试失败（反向验证）。
 - 反向验证：去掉 `route/route.go` 的改动后，上面三个端到端测试会失败（mixed 的测试单独做过：去掉 `resolvedToFakeIP` 后在"代理"那一步失败）。
 - `route/...`、`dns/...`、`experimental/cachefile/...`、`adapter/...`、`option/...` 原有测试全部通过，`go vet` 无告警。
