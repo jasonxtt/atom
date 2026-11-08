@@ -81,11 +81,11 @@ atom 用新的 Clash API 密钥确认重载，旧实例不认它，所以确认�
 - 反向验证：去掉 `route/route.go` 的改动后，上面三个端到端测试会失败（mixed 的测试单独做过：去掉 `resolvedToFakeIP` 后在"代理"那一步失败）。
 - `route/...`、`dns/...`、`experimental/cachefile/...`、`adapter/...`、`option/...` 原有测试全部通过，`go vet` 无告警。
 
+- 和 AtomDNS 联调（第 4 步，Linux，nft redirect + TProxy，见 [deploy-nft.md](deploy-nft.md) 第 7 节）：redirect 入站的 TCP、TProxy 入站的 UDP 都按绑定出去，UDP 回包源地址是 FakeIP；cache file 里的绑定在 sing-box 重启后仍然生效；重载失败时进程不退出。TProxy 写回 UDP 时要绑定"原目标地址:端口"，和本机在同一端口通配地址上、没设 `SO_REUSEADDR` 的监听冲突（atomdns 的 53，已在 atomdns 侧修，见 design.md 9.4）。
+
 ## 未验证
 
-- 没有在 Linux 上配合 TProxy 或 TUN 做实机测试。
-- PreMatch 只在 TUN 下生效。有绑定时补丁把连接交回常规路径，这条路径没有在 TUN 下测试。
-- 没有和 AtomDNS 联调。AtomDNS 侧的 EDNS 编码还没有实现。
+- 没有在 TUN 下测试。PreMatch 只在 TUN 下生效；有绑定时补丁把连接交回常规路径，这条路径没有在 TUN 下测试。
 
 ## 已知限制
 

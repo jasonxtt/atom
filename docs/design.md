@@ -1,6 +1,6 @@
 # atom 设计文档 v0
 
-状态：v0 已审，第 12 节的问题已答复；第 2 步实现时新定的事项写回了第 3、4、8 节，第 3 步的写回了第 4.6、5、6、8 节。日期：2026-11-08。
+状态：v0 已审，第 12 节的问题已答复；第 2 步实现时新定的事项写回了第 3、4、8 节，第 3 步的写回了第 4.6、5、6、8 节，第 4 步的写回了第 4.6、6、7.3、9.4、11 节。日期：2026-11-09。
 
 标记说明：**[定]** 表示已经和用户确认；**[建议]** 是我的提议，等审阅；**[待定]** 表示还要讨论。
 
@@ -153,7 +153,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 - 带 `ip_cidr` 的规则只能单独用，不能再带域名或 `client` 条件（否则 400）。动作可以是代理、直连、屏蔽。
 - AtomDNS 的 DNS 匹配跳过它们（`rules/test` 也不会命中）。启用的 IP 规则按规则表里的顺序编译成 sing-box 路由规则，排在 mixed 入站的 `resolve` 之后：代理 → `route` 到组，直连 → `route` 到 `direct`，屏蔽 → `reject`。网段写回规范形式（主机位清零）。
 - 改动规则时，如果启用的 IP 规则（网段、动作、顺序）有变化，就走一遍 sing-box 应用事务（第 6 节），应用失败时规则的改动也不保存。只改域名规则不碰 sing-box。
-- nft 部分（第 4、7 步）：`GET status` 的 `nft` 给出 FakeIP 网段和 IP 规则网段（分 inet4/inet6），安装器和联调按它生成 nft 规则。
+- nft 部分（第 4 步实现，见 9.4）：nft 规则把 FakeIP 网段和 IP 规则网段导进 sing-box，网段放在 nft 集合里，由 atomdns 在每次应用成功后和启动时更新；`GET status` 的 `nft` 给出网段（分 inet4/inet6）、表名和最近一次更新的结果。只导 IPv4：IPv6 的 IP 规则只对 7890 入站有效。单网卡旁路由时，IP 规则的网段也要在主路由上加静态路由，否则只对 7890 有效。
 - 没有配置 `singbox` 段时（比如测试配置），`ip_cidr` 规则仍然返回 400。
 
 ### 4.7 实现（第 2 步）
@@ -254,7 +254,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 第 3 步定下和实现的 **[定]**：
 
 - **进程管理**：sing-box 跑在独立的 systemd 单元 `atom-sing-box.service` 里（单元文件由第 7 步的安装器写，`ExecReload=kill -HUP $MAINPID`，`Restart=on-failure`）。atom 写完配置后执行 `systemctl reload-or-restart atom-sing-box.service`：单元在运行就发 SIGHUP，没在运行（第一次）就启动它。sing-box 崩了由 systemd 拉起，atom 重启不影响代理。
-- **位置**：配置和 `cache.db` 放在 atom 配置根下的 `sing-box/`。程序路径、工作目录、重载命令、Clash API 地址（`127.0.0.1:9090`）、FakeIP DNS 入站（`127.0.0.1:6666`）、本机 AtomDNS 地址（`127.0.0.1:53`）、redirect 7892 / tproxy 7893、默认 resolver 来自哪个上游组（`domestic`）写在自带 YAML 里 `atom_rules` 插件的 `singbox` 段，不对用户开放。
+- **位置**：配置和 `cache.db` 放在 atom 配置根下的 `sing-box/`。程序路径、工作目录、重载命令、Clash API 地址（`127.0.0.1:9090`）、FakeIP DNS 入站（`127.0.0.1:6666`）、本机 AtomDNS 地址（`127.0.0.1:53`）、redirect 7892 / tproxy 7893、默认 resolver 来自哪个上游组（`domestic`）、nft 表名（`atom`，第 4 步加，见 9.4）写在自带 YAML 里 `atom_rules` 插件的 `singbox` 段，不对用户开放。
 - **重载失败不退出**（参考 PR15 后定，sing-box 补丁）：上游 v1.14.4 收到 SIGHUP 后先关掉旧实例；新配置如果通过了 `check` 却启动失败（端口被占用这类运行期错误），进程会直接退出，要等 atom 回滚、systemd 重启，中间代理和国外 DNS 都断。补丁让 `cmd_run.go` 记住上一份成功运行过的配置，新实例启动失败时用它在内存里把旧实例重建出来，进程不退出。atom 这边不用改：旧实例不认新密钥，确认照样失败，atom 写回旧文件再重载一次，最后运行的还是旧配置。
 - **确认新配置生效**：每次应用都生成新的随机 Clash API 密钥写进配置。旧实例不认新密钥，所以用新密钥在 20 秒内拿到 `/proxies`（里面有 `final`）就证明新配置已经在跑。代价：本机接了第三方 Clash 面板的话，每次应用后要重新填密钥（Clash API 只监听 127.0.0.1）。
 - **选择要同步**（codex 复审后加）：sing-box 的 selector 启动时先用 `cache.db` 里记住的选择，再看 `default`。所以每次重载并确认后，atom 用 Clash API 把每个有成员的 selector 组和 Final 切到 atom 记录的选择；同步失败按应用失败处理（回滚）。回滚时旧实例也按旧状态重新同步一遍。
@@ -293,9 +293,9 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 
 由控制面一处修改、同时下发到各组件：
 
-- FakeIP 网段：sing-box 的 `inet4_range`、nft 规则、主路由静态路由（文档提示用户配置）。
+- FakeIP 网段：sing-box 的 `inet4_range`、nft 集合（atomdns 更新，9.4）、主路由静态路由（文档提示用户配置）。
 - IPv6：v0 不做 IPv6 FakeIP；被代理域名的 AAAA 查询返回空应答。**[建议]**
-- IP 规则网段：sing-box 路由规则和 nft 规则。
+- IP 规则网段：sing-box 路由规则和 nft 集合（atomdns 更新，9.4）；单网卡旁路由时还有主路由静态路由（提示用户配置）。
 
 ## 8. 管理 API（骨架）**[建议]**
 
@@ -326,7 +326,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
   - `GET groups` 的每个组带 `empty`、`builtin`，selector 带当前选中 `now`。`POST groups {name, type: selector|urltest, members, selected?, url?, interval?, tolerance?}` 新建，`PUT groups/{id}` 整组替换，`DELETE groups/{id}?confirm=true`（见 5.3），`POST groups/{id}/select {name}`，`POST groups/{id}/delay {url?, timeout?}`（毫秒，默认 5000）返回 `{delays: {成员: 毫秒}}`。
   - `GET final` 返回 `{version, members, selected, empty}`。`PUT final {members?, selected?}`：成员变了走应用事务；只改选中项走 Clash API。
   - `GET settings` 返回 `{version, fakeip_range, resolver, resolver_effective, mixed_port}`，`PUT settings` 改其中任意几项。
-  - `GET status`：`atomdns.version`；`singbox.running`、`version`（Clash API 的 `/version`）、`in_sync`（运行中的文件是否就是当前状态生成的）、`host`；`last_apply`；`warnings.empty_groups`；`nft`（4.6）。`GET apply` 返回 `last_apply` 和 `in_sync`，`POST apply` 用新密钥重新应用一次。`last_apply` 是 `{at, trigger, ok, changed, error?}`，`trigger` 是 `nodes`、`groups`、`final`、`settings`、`rules`、`apply`、`startup` 之一，在进程内跨配置重载保留。
+  - `GET status`：`atomdns.version`；`singbox.running`、`version`（Clash API 的 `/version`）、`in_sync`（运行中的文件是否就是当前状态生成的）、`host`；`last_apply`；`warnings.empty_groups`；`nft`（4.6、9.4：`fakeip_range`、`ip_cidr`、表名 `table`、最近一次更新集合的结果 `sync`）。`GET apply` 返回 `last_apply` 和 `in_sync`，`POST apply` 用新密钥重新应用一次。`last_apply` 是 `{at, trigger, ok, changed, error?}`，`trigger` 是 `nodes`、`groups`、`final`、`settings`、`rules`、`apply`、`startup` 之一，在进程内跨配置重载保留。
   - 写操作都可以带 `version`（请求体，DELETE 用 `?version=`），和节点状态的版本比较。sing-box check 不通过 400，重载或确认失败 502（已回滚），一次应用进行中 409。
   - 写操作占用管理租约，`PUT settings` 例外：它自己拿租约，只覆盖 sing-box 的部分，因为改 mixed 端口要重新加载 AtomDNS 配置，而重新加载要等所有租约结束。
 - 错误格式沿用 AtomDNS 现有的格式。**[定]**
@@ -357,6 +357,16 @@ VM 上：TCP 用 redirect，UDP 用 TProxy，只处理目标是 FakeIP 网段和
 
 v0 不做 IPv6 FakeIP，被代理的域名只返回 IPv4。
 
+### 9.4 nft 和策略路由（第 4 步）**[定]**
+
+具体规则、端口、标记和实测环境见 [deploy-nft.md](deploy-nft.md)。
+
+- **规则**：nft 表 `inet atom`，两个集合 `fakeip4`（FakeIP 网段）、`iprule4`（启用的 IP 规则的 IPv4 网段），`flags interval; auto-merge`。`prerouting` 上只看局域网网卡进来、目标不是本机地址的包：目标在集合里的 TCP redirect 到 7892，UDP TProxy 到 7893 并打标记 `0x233`；策略路由 `fwmark 0x233 lookup 233`，表 233 是 `local 0.0.0.0/0 dev lo`。双网卡网关另加一张 `ip atom_nat` 表（LAN → WAN 的 masquerade）和 `ip_forward = 1`；单网卡旁路由不需要 `ip_forward`。
+- **sing-box 自己的流量**：nft 只挂 `prerouting`，本机进程的包走 `output`，不会被导回来，所以不设 `routing_mark`、也没有排除标记。本机进程访问 FakeIP 不处理。
+- **集合由 atomdns 维护**（用户选的，没有放进应用事务）：`atom_rules.yaml` 的 `singbox.nft_table: atom`（没有就不碰 nft），`singbox.nft` 是命令（默认 `[nft]`）。sing-box 应用成功后（FakeIP 网段和 IP 规则只随应用变化）、`POST apply` 后、每次启动和重新加载配置时，用 `nft -f` 执行一个脚本，两个集合 flush 后重新写入，一个事务。更新在应用锁里做，不会乱序。失败不回滚规则的改动，只记日志和 `status.nft.sync`（`{at, ok, error?, sets}`）。规则文件里的集合是空的，每次加载都整表替换，所以 atomdns 的单元先 `ExecStartPre` 加载规则文件和策略路由，启动后自己填集合（安装器的写法，第 7 步）。实现在 `atom_singbox.rs`（`NftSets`、`nft_script`、`sync_nft`）和 `atom_rules/singbox.rs`（`sync_nft`、`last_nft`）。
+- **UDP 53 的写回**（联调发现，用户选的修法）：sing-box 的 TProxy 回包要用 IP_TRANSPARENT 绑定"原目标地址:端口"，atomdns 在 `*:53` 监听且没设 `SO_REUSEADDR` 时，客户端发往 FakeIP 或 IP 规则地址的 UDP 53（比如 IP 规则里有 8.8.8.8，客户端直接问它）绑定报 `EADDRINUSE`，回包发不出去。改为 atomdns 在通配地址（`[::]`、`0.0.0.0`）上的 UDP 监听设 `SO_REUSEADDR`（`rust/native-host/src/bind.rs`）。代价：同一台机器上再起一个监听通配地址的 atomdns，不会再报端口被占用，而是共用 53 端口；具体地址的监听照旧拒绝重复绑定。
+- **拓扑**：单网卡旁路由和双网卡网关都在 netns 里实测过（deploy-nft.md 第 7 节）。单网卡时主路由只看到去程，转发链里"丢弃 invalid"的规则可能丢包，这一点没有实测条件，文档给了两种处理办法。
+
 ## 10. 仓库与版本
 
 ```text
@@ -377,7 +387,7 @@ atom/
 1. **AtomDNS fork 打底**（已完成）：从 main 建分支；锁定 7.1 里的项，删除 RealIP、专属分流组和在线更新；加上 EDNS0 65001 编码，Final 路径发 CLEAR。验收：沿用现有名单，链路能跑通，FakeIP 带上 CLEAR。
 2. **规则表**（已完成，实现见 4.7）：模型、首条命中匹配插件、`rules` API、拖动、`rules/test`；规则命中"代理"时发 SET。另外做了 `ruleset` 条件的全部三种来源（内置、远程 URL、本地列表）和 `rulesets` API。**[定]** 还没做：远程规则集的定时自动更新（现在只能手动 `refresh`）。
 3. **sing-box 配置生成**（已完成，2026-11-09 收尾，经过三轮 codex 复审；实现见 4.6、5.3、第 6 节）：节点导入（JSON/YAML/链接）、节点组、Final、事务式应用和回滚；7890 按规则分流，包括 sing-box 补丁里 resolve 之后查绑定的那一处。还没做：nft 规则（第 4、7 步）、systemd 单元文件（第 7 步）。
-4. **联调**：在测试机上组装 VM 环境，配好 nft，做端到端验证（TCP/UDP、拖动后立即生效、重启后恢复）。
+4. **联调**（已完成，2026-11-09；实现和定下的事见 4.6、9.4，规则见 [deploy-nft.md](deploy-nft.md)）：在 mosdns-rust 上用临时 systemd 单元跑 atomdns 和补丁版 sing-box，客户端用 netns 模拟，单网卡旁路由和双网卡网关两种形态都实测。验证通过的：DNS（代理规则 → FakeIP 且 sing-box 收到 SET，AAAA 空应答也带 SET；直连 → 真实 IP；屏蔽 → 空应答；没命中的国外域名 → FakeIP + CLEAR；国内域名 → 真实 IP；EDNS 选项用抓包核对）；TCP 经 redirect、UDP 经 TProxy（NTP、DNS）进 sing-box，从绑定的组或 Final 出去，UDP 回包源地址是 FakeIP；IP 规则（TCP、UDP、屏蔽，启用/停用时 nft 集合跟着变）；7890 按规则分流；拖动排序和改组立即生效，删掉代理规则后下一次查询重新发 CLEAR（缓存已清）；sing-box 重启后不重新查 DNS 绑定仍在；atomdns 重启后规则、节点、组、Final 不变，启动检查不重载 sing-box，nft 表重新加载并填好；`sing-box check` 不通过返回 400 什么都不动；mixed 端口被占时重载失败返回 502 并回滚，sing-box 进程不退出（PID 不变），期间 7890 请求 40/40 成功；网关形态下其他流量经 NAT 转发、不进 sing-box。联调中修的：UDP 53 写回（9.4）。没做：真实主路由下的单网卡形态、真实节点。
 5. **绑定账本和缓存失效**（4.5）。
 6. **简易 WebUI + OpenAPI 规范定稿**。
 7. **安装器**。
