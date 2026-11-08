@@ -195,7 +195,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 - 批量导入是全有或全无：任何一项转换失败就整体返回 400，错误里写"第 N 项"。导入的节点再经过整份配置的 `sing-box check`，不通过也整体不导入。
 - 节点类型限于代理协议（socks、http、shadowsocks、vmess、trojan、naive、wireguard、hysteria、shadowtls、vless、tuic、hysteria2、anytls、ssh、tor）；outbound 不能带 `tag`（由 atom 设为节点 ID）和 `detour`（链式代理暂不提供）。
 - 删除节点不需要确认：它从所有组和 Final 的成员里移除，组因此变空时按空组处理（5.2）。
-- **不回显凭据**（参考 PR15 后定，codex 复审后对照 v1.14.4 的 option 定义补全）：接口返回的节点（列表、详情、导入和修改的结果）去掉所有层级里的 `password`、`username`、`user`、`uuid`、`auth`、`auth_str`、`private_key`、`private_key_passphrase`、`pre_shared_key`、TLS 的 `client_key`、REALITY 的 `short_id`（服务端只认它列出的 ID，算凭据；`public_key` 是公开的，保留），以及通用的 `key`、`psk`、`token`、`secret`；hysteria v1 字符串形式的 `obfs`（混淆密码）；tor 的 `torrc` 和 `extra_args` 整个不返回（里面可能以任意形式写着凭据，比如 `HTTPSProxyAuthenticator`）；`headers`、`extra_headers` 里的 `Authorization`、`Proxy-Authorization`、`Cookie`。导入时凭据字段原样保存，不去首尾空白。修改节点时可以只改名称；要改连接参数，就重新给一条链接、YAML 或 JSON（`format` + `content`，只能是一个节点）整体替换，名称不变，除非同时给了 `name`。不给内容就保留原来的连接。凭据只存在 `webinfo/atom_proxy.json` 和 sing-box 的 `config.json` 里。
+- **不回显凭据**（参考 PR15 后定，codex 复审后对照 v1.14.4 的 option 定义补全）：接口返回的节点（列表、详情、导入和修改的结果）去掉所有层级里的 `password`、`username`、`user`、`uuid`、`auth`、`auth_str`、`private_key`、`private_key_passphrase`、`pre_shared_key`、TLS 的 `client_key`、REALITY 的 `short_id`（服务端只认它列出的 ID，算凭据；`public_key` 是公开的，保留），以及通用的 `key`、`psk`、`token`、`secret`（字段名按 sing-box 的 JSON 解码方式不区分大小写比较，连 `ſ`、开尔文符号这类 Unicode 折叠也算，所以 `Password`、`TORRC`、`Headers.Authorization` 一样会被去掉；拒绝 `tag`、`detour` 时也这样比较）；hysteria v1 字符串形式的 `obfs`（混淆密码）；tor 的 `torrc` 和 `extra_args` 整个不返回（里面可能以任意形式写着凭据，比如 `HTTPSProxyAuthenticator`）；`headers`、`extra_headers` 里的 `Authorization`、`Proxy-Authorization`、`Cookie`。导入时凭据字段原样保存，不去首尾空白。修改节点时可以只改名称；要改连接参数，就重新给一条链接、YAML 或 JSON（`format` + `content`，只能是一个节点）整体替换，名称不变，除非同时给了 `name`。不给内容就保留原来的连接。凭据只存在 `webinfo/atom_proxy.json` 和 sing-box 的 `config.json` 里。
 - **单节点测速**：`POST nodes/{id}/delay` 走 Clash API `GET /proxies/{id}/delay`，和组测速一样，`url` 可选、超时默认 5000 毫秒、限制在 100 到 30000 毫秒之间。
 
 ### 5.2 节点组
@@ -376,7 +376,7 @@ atom/
 
 1. **AtomDNS fork 打底**（已完成）：从 main 建分支；锁定 7.1 里的项，删除 RealIP、专属分流组和在线更新；加上 EDNS0 65001 编码，Final 路径发 CLEAR。验收：沿用现有名单，链路能跑通，FakeIP 带上 CLEAR。
 2. **规则表**（已完成，实现见 4.7）：模型、首条命中匹配插件、`rules` API、拖动、`rules/test`；规则命中"代理"时发 SET。另外做了 `ruleset` 条件的全部三种来源（内置、远程 URL、本地列表）和 `rulesets` API。**[定]** 还没做：远程规则集的定时自动更新（现在只能手动 `refresh`）。
-3. **sing-box 配置生成**（已完成，实现见 4.6、5.3、第 6 节）：节点导入（JSON/YAML/链接）、节点组、Final、事务式应用和回滚；7890 按规则分流，包括 sing-box 补丁里 resolve 之后查绑定的那一处。还没做：nft 规则（第 4、7 步）、systemd 单元文件（第 7 步）。
+3. **sing-box 配置生成**（已完成，2026-11-09 收尾，经过三轮 codex 复审；实现见 4.6、5.3、第 6 节）：节点导入（JSON/YAML/链接）、节点组、Final、事务式应用和回滚；7890 按规则分流，包括 sing-box 补丁里 resolve 之后查绑定的那一处。还没做：nft 规则（第 4、7 步）、systemd 单元文件（第 7 步）。
 4. **联调**：在测试机上组装 VM 环境，配好 nft，做端到端验证（TCP/UDP、拖动后立即生效、重启后恢复）。
 5. **绑定账本和缓存失效**（4.5）。
 6. **简易 WebUI + OpenAPI 规范定稿**。
