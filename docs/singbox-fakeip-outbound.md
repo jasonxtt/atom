@@ -14,7 +14,7 @@ AtomDNS 决定域名走哪个出口，把结果放在发给 sing-box FakeIP DNS 
 |---|---|
 | `adapter/inbound.go` | `InboundContext` 增加 `FakeIPOutbound` |
 | `adapter/fakeip.go` | `FakeIPStore` 增加 `StoreOutbound`/`LookupOutbound`，`FakeIPStorage` 增加 `FakeIPStoreOutbound`/`FakeIPLoadOutbound` |
-| `dns/transport/fakeip/fakeip.go` | 解析 EDNS0 65001，在分配或复用地址前更新绑定 |
+| `dns/transport/fakeip/fakeip.go` | 解析 EDNS0 65001，在分配或复用地址前更新绑定；绑定保存失败时这次查询报错 |
 | `dns/transport/fakeip/store.go` | 绑定读写转发到存储 |
 | `dns/transport/fakeip/memory.go` | 内存存储增加 `outboundCache`，`FakeIPReset` 一并清空 |
 | `experimental/cachefile/fakeip.go` | 新 bucket `fakeip_outbound`，`FakeIPReset` 一并删除 |
@@ -42,7 +42,7 @@ AtomDNS 决定域名走哪个出口，把结果放在发给 sing-box FakeIP DNS 
 - 没有绑定的域名照常走 `route.rules` 和 `route.final`。
 - 已建立的连接不会因为绑定变化而迁移。
 - 规则变化后，AtomDNS 的绑定账本会主动给有变化的域名发 SET 或 CLEAR（不用等客户端重新查询，见 [design.md](design.md) 4.5.1）；sing-box 这边不用改。
-- 绑定写失败时只记 warning，DNS 仍正常应答。
+- 绑定写失败时（比如 cache file 写不进去），这次查询不返回应答（报错，客户端看到的是 SERVFAIL 或超时），已有绑定保持不变。原来是只记 warning、照常应答，但 AtomDNS 的绑定账本把正常应答当作"绑定已生效"，之后不会再发；改成报错后，账本保留旧值，下次重算再发（atom 第 5 步 codex 第 2 轮复审后改）。不带指令的查询不受影响。
 - 开启 `experimental.cache_file` 的 `store_fakeip` 后，绑定可以跨重启保留。
 
 ## 代理入站（mixed 7890）
@@ -72,7 +72,7 @@ atom 用新的 Clash API 密钥确认重载，旧实例不认它，所以确认�
 
 在本机（macOS）运行 `go test`：
 
-- `dns/transport/fakeip/outbound_test.go`：EDNS 解析的各种情况；SET 复用已有地址；A/AAAA 共用绑定；无指令不改变绑定；CLEAR 清除；Reset 清空。
+- `dns/transport/fakeip/outbound_test.go`：EDNS 解析的各种情况；SET 复用已有地址；A/AAAA 共用绑定；无指令不改变绑定；CLEAR 清除；Reset 清空。绑定保存失败时查询报错、旧绑定不变、不带指令的查询照常应答、存储恢复后指令生效（反向验证：改回只记 warning 后这个测试失败）。
 - `route/fakeip_outbound_test.go`：进程内启动真实的 sing-box，路由规则把 socks 入站全部 reject。
   - 未绑定时被拒；SET 后 TCP 和 UDP 都能通过，UDP 回包源地址是 FakeIP；CLEAR 后又被拒；绑定到不存在的出口时阻断。
   - 开启 cache file 后重启实例，不重新查 DNS，绑定仍然生效；CLEAR 后重启，仍保持清除状态。

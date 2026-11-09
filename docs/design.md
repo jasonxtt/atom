@@ -148,7 +148,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 #### 4.5.1 实现（第 5 步）**[定]**
 
 - **账本**（`rust/native-host/src/atom_ledger.rs`）：键是查询问题段里的原名字（wire 形式，保留大小写，sing-box 按原样保存绑定），值是 SET 某个标签或 CLEAR。容量固定 16384 条，不对用户开放，最久没有记录的先淘汰。账本是进程级的，AtomDNS 重新加载配置时不丢，进程重启后为空。
-- **记录**：`ForwardCatalog` 发往 `nocnfake` 的 A 查询拿到 sing-box 的应答后，按带的指令记一条（SET 组，或者 CLEAR）。AAAA 不记：sing-box 的 FakeIP 只有 IPv4 网段，它对 AAAA 直接返回空应答，根本不读指令，记了会让账本以为 sing-box 已经换了绑定（codex 第 1 轮）。账本自己发的指令被确认后也更新。SET 和 CLEAR 都记：原判断判成国外的域名也在账本里，用户给它加了规则以后，客户端手里的 FakeIP 立即跟着走。
+- **记录**：`ForwardCatalog` 发往 `nocnfake` 的 A 查询拿到 sing-box 的 NOERROR 应答后，按带的指令记一条（SET 组，或者 CLEAR）。AAAA 不记：sing-box 的 FakeIP 只有 IPv4 网段，它对 AAAA 直接返回空应答，根本不读指令，记了会让账本以为 sing-box 已经换了绑定（codex 第 1 轮）。账本自己发的指令被确认后也更新。SET 和 CLEAR 都记：原判断判成国外的域名也在账本里，用户给它加了规则以后，客户端手里的 FakeIP 立即跟着走。
 - **重算**：对账本里的每个域名，用新规则表重新判断。客户端按"不属于任何客户端条件"处理，带 `client` 条件的规则一律不命中：这类规则只能是直连或屏蔽，命中它的查询不会发给 sing-box，所以 sing-box 里的全局绑定反映的是其他客户端得到的结论（4.2）。内置规则集的 fast_flags 按 mapper 现场算，和 `rules/test` 一样。新结论对应的指令：
   - 代理 → 组 Y：SET Y；
   - 直连：SET `direct`；屏蔽：SET `block`（生成的配置里都有这两个出站），客户端手里的 FakeIP 立即直连或被拒，直连时由 sing-box 用 resolver 解析域名；
@@ -157,7 +157,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
   和账本里的旧值一样就不发。
 - **发送**：用 UDP 直接向 `singbox.dns_in`（127.0.0.1:6666）发 A 查询，带 65001 指令，格式和客户端查询经过 `edns_directive.rs` 后的一样。每次最多 32 个同时在途，单次等 1 秒，没回应就再试一次。
 - **时机**：同步做。修改落盘、清空缓存之后，接口返回之前；进程里一把锁串行，后开始的重算一定用最新的规则表。接口返回时，sing-box 的绑定已经改好。
-- **失败**：修改照样生效，接口照样返回成功，因为规则已经保存了。sing-box 没确认的域名，账本保留旧值，下次重算再试；客户端下一次查询也会带上新指令（代理规则的查询不经过缓存）。失败记日志，`GET status` 的 `bindings` 给出 `{size, capacity, last: {at, trigger, changed, failed, error?}}`。
+- **失败**：修改照样生效，接口照样返回成功，因为规则已经保存了。只有 NOERROR 应答才算确认；sing-box 的补丁在绑定保存失败（比如 cache file 写不进去）时让这次查询报错，不再照常应答（codex 第 2 轮，见 singbox-fakeip-outbound.md）。sing-box 没确认的域名，账本保留旧值，下次重算再试；客户端下一次查询也会带上新指令（代理规则的查询不经过缓存）。失败记日志，`GET status` 的 `bindings` 给出 `{size, capacity, last: {at, trigger, changed, failed, error?}}`。
 - **各种改动之后**：
   - 规则的增、删、改、拖动、启用、停用，以及规则集的新建、修改、删除、`refresh`：都重算；
   - 带 `confirm=true` 删除节点组：引用它的规则改成 `final`，然后重算，绑定到这个组的域名发 SET final。从 sing-box 应用新配置到重算完成之间，大约几毫秒，绑定到已删组的连接会被阻断；
