@@ -41,6 +41,7 @@ AtomDNS 决定域名走哪个出口，把结果放在发给 sing-box FakeIP DNS 
 - 标签不存在时报错 `outbound not found: <tag>`，连接被阻断，不会回退到默认出口。
 - 没有绑定的域名照常走 `route.rules` 和 `route.final`。
 - 已建立的连接不会因为绑定变化而迁移。
+- 规则变化后，AtomDNS 的绑定账本会主动给有变化的域名发 SET 或 CLEAR（不用等客户端重新查询，见 [design.md](design.md) 4.5.1）；sing-box 这边不用改。
 - 绑定写失败时只记 warning，DNS 仍正常应答。
 - 开启 `experimental.cache_file` 的 `store_fakeip` 后，绑定可以跨重启保留。
 

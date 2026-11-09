@@ -1,6 +1,6 @@
 # atom 设计文档 v0
 
-状态：v0 已审，第 12 节的问题已答复；第 2 步实现时新定的事项写回了第 3、4、8 节，第 3 步的写回了第 4.6、5、6、8 节，第 4 步的写回了第 4.6、6、7.3、9.4、11 节。日期：2026-11-09。
+状态：v0 已审，第 12 节的问题已答复；第 2 步实现时新定的事项写回了第 3、4、8 节，第 3 步的写回了第 4.6、5、6、8 节，第 4 步的写回了第 4.6、6、7.3、9.4、11 节，第 5 步的写回了第 4.5、7.2、8、11 节。日期：2026-11-09。
 
 标记说明：**[定]** 表示已经和用户确认；**[建议]** 是我的提议，等审阅；**[待定]** 表示还要讨论。
 
@@ -141,8 +141,37 @@ Rule {
 sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS 应答，所以规则改动天然会有滞后。处理办法：
 
 1. 清空 AtomDNS 的各级缓存。v0 直接全清，以后再细化为按受影响的域名清。**[定]** 第 2 步已实现：`/api/v1/atom/` 下每次成功的修改（规则、规则集）都清空配置里的所有缓存。
-2. **绑定账本**：AtomDNS 在内存里记录"给 sing-box 发过 SET 的域名 → 组"，用 LRU 限制大小。规则变化后，用新规则重算这些域名，把有变化的 SET/CLEAR 直接用 DNS 查询发给 sing-box，不需要新接口。这样"组 X 改成组 Y"可以立即生效。**[建议]**
-3. 直连和代理互换的情况，客户端手里拿的是真实 IP，只能等它的 DNS 缓存过期。直连应答的 TTL 要设上限（可配置，默认 **[待定]**）。
+2. **绑定账本**：AtomDNS 在内存里记录发给 sing-box 的每个域名最后一次被确认的指令，用 LRU 限制大小。规则变化后，用新规则重算这些域名，把有变化的 SET/CLEAR 直接用 DNS 查询发给 sing-box，不需要新接口。这样"组 X 改成组 Y"可以立即生效，客户端不用重新查询。**[定]** 第 5 步实现，细节见下面的 4.5.1。
+3. 直连和代理互换的情况，客户端手里拿的是真实 IP，只能等它的 DNS 缓存过期。直连应答的 TTL 设上限 `direct_ttl_max`，默认 **300 秒**，可以通过 `PUT settings` 修改。**[定]**
+4. **FakeIP 应答的 TTL** 设上限 `fakeip_ttl_max`，默认 **1 秒**，和生产环境的用法一致；也可以通过 `PUT settings` 修改。sing-box 给的是 600 秒（`C.DefaultDNSTTL`），太长了。**[定]** 有了 1 秒的 TTL，客户端很快会重新查询，新规则随之生效；账本主要用来照顾不遵守短 TTL 的客户端，比如 Java、浏览器自带的 DNS 缓存。
+
+#### 4.5.1 实现（第 5 步）**[定]**
+
+- **账本**（`rust/native-host/src/atom_ledger.rs`）：键是查询问题段里的原名字（wire 形式，保留大小写，sing-box 按原样保存绑定），值是 SET 某个标签或 CLEAR。容量固定 16384 条，不对用户开放，最久没有记录的先淘汰。账本是进程级的，AtomDNS 重新加载配置时不丢，进程重启后为空。
+- **记录**：`ForwardCatalog` 发往 `nocnfake` 的查询拿到 sing-box 的应答后，按带的指令记一条（SET 组，或者 CLEAR）。账本自己发的指令被确认后也更新。SET 和 CLEAR 都记：原判断判成国外的域名也在账本里，用户给它加了规则以后，客户端手里的 FakeIP 立即跟着走。
+- **重算**：对账本里的每个域名，用新规则表重新判断。客户端按"不属于任何客户端条件"处理，带 `client` 条件的规则一律不命中：这类规则只能是直连或屏蔽，命中它的查询不会发给 sing-box，所以 sing-box 里的全局绑定反映的是其他客户端得到的结论（4.2）。内置规则集的 fast_flags 按 mapper 现场算，和 `rules/test` 一样。新结论对应的指令：
+  - 代理 → 组 Y：SET Y；
+  - 直连：SET `direct`；屏蔽：SET `block`（生成的配置里都有这两个出站），客户端手里的 FakeIP 立即直连或被拒，直连时由 sing-box 用 resolver 解析域名；
+  - 没有规则命中（交给原判断，没法离线算）：CLEAR，交给 Final，和"国外"的结论一致。
+  
+  和账本里的旧值一样就不发。
+- **发送**：用 UDP 直接向 `singbox.dns_in`（127.0.0.1:6666）发 A 查询，带 65001 指令，格式和客户端查询经过 `edns_directive.rs` 后的一样。每次最多 32 个同时在途，单次等 1 秒，没回应就再试一次。
+- **时机**：同步做。修改落盘、清空缓存之后，接口返回之前；进程里一把锁串行，后开始的重算一定用最新的规则表。接口返回时，sing-box 的绑定已经改好。
+- **失败**：修改照样生效，接口照样返回成功，因为规则已经保存了。sing-box 没确认的域名，账本保留旧值，下次重算再试；客户端下一次查询也会带上新指令（代理规则的查询不经过缓存）。失败记日志，`GET status` 的 `bindings` 给出 `{size, capacity, last: {at, trigger, changed, failed, error?}}`。
+- **各种改动之后**：
+  - 规则的增、删、改、拖动、启用、停用，以及规则集的新建、修改、删除、`refresh`：都重算；
+  - 带 `confirm=true` 删除节点组：引用它的规则改成 `final`，然后重算，绑定到这个组的域名发 SET final。从 sing-box 应用新配置到重算完成之间，大约几毫秒，绑定到已删组的连接会被阻断；
+  - 节点组成员、Final 的成员和选中项：不用处理，绑定按标签找出站，selector 会自己跟着变；
+  - IP 规则：不影响域名的结论；
+  - 改 FakeIP 网段：sing-box 会清空所有映射和绑定，所以账本也清空；
+  - sing-box 重启或重载：账本不变，绑定还在 `cache.db` 里（第 4 步验证过）。
+- **TTL 上限**：在 `execute_request`（UDP 和 TCP 的 53 端口共用）返回应答之前统一处理，缓存命中的应答也一样：A/AAAA 应答里只要有一个地址在 FakeIP 网段内，所有记录的 TTL 都压到 `fakeip_ttl_max`；否则压到 `direct_ttl_max`。只往下压，不往上提。没有地址的应答（空应答、NXDOMAIN、其他类型）不动。缓存里存的仍然是上游原来的 TTL，所以改上限后不用清缓存，下一次应答就按新值。两个设置存在 `atom_proxy.json` 的 `settings` 里，范围 1 到 86400 秒，不进 sing-box 配置，改了也不会触发重载。没有 `singbox` 段时（比如测试配置）不封顶。
+- **已知限制**：
+  - AtomDNS 进程重启后账本为空，之后改规则只影响重启后查询过的域名；不做持久化。
+  - 被 LRU 淘汰的域名退回到原来的行为：等客户端重新查询。
+  - 竞态：重算的同时，还在用旧规则表处理的查询可能比账本的指令晚到 sing-box，把绑定写回旧值。时间窗口就是一次查询的耗时。
+  - 带客户端条件的规则加上之前，那个客户端已经拿到的 FakeIP，在过期前仍按全局绑定走（sing-box 不区分客户端）。
+  - 不经过 atom API 的变化，比如 AdGuard、geosite 的在线更新，既不清缓存，也不触发重算。
 
 ### 4.6 IP 规则
 
@@ -287,7 +316,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 
 ### 7.2 开放（通过控制面 API 修改）
 
-`core_mode`（兼容/安全模式）、类型屏蔽、IPv4 优先、缓存开关和容量、国内外上游 DNS 列表、ECS、域名学习、FakeIP 网段（改了要连同 nft 规则一起重新生成）、直连应答的 TTL 上限。
+`core_mode`（兼容/安全模式）、类型屏蔽、IPv4 优先、缓存开关和容量、国内外上游 DNS 列表、ECS、域名学习、FakeIP 网段（改了要连同 nft 规则一起重新生成）、直连应答和 FakeIP 应答的 TTL 上限（第 5 步实现：`PUT settings` 的 `direct_ttl_max`、`fakeip_ttl_max`，见 4.5）。
 
 ### 7.3 跨组件的一致性
 
@@ -325,8 +354,8 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
   - `GET nodes` 返回 `{version, nodes}`，每个节点带 `id`、`name`、`type`、`server`、`server_port`、去掉凭据的 `outbound`（5.1）和所在的组 `groups`。`POST nodes {format, content}` 导入，`content` 是字符串（`json` 格式也可以直接给 JSON 值），返回 201 和新节点。`PUT nodes/{id} {name?, format?, content?}`（`format` 和 `content` 要一起给，整体替换连接），`DELETE nodes/{id}?version=N`，`POST nodes/{id}/delay {url?, timeout?}` 返回 `{id, delay}`。
   - `GET groups` 的每个组带 `empty`、`builtin`，selector 带当前选中 `now`。`POST groups {name, type: selector|urltest, members, selected?, url?, interval?, tolerance?}` 新建，`PUT groups/{id}` 整组替换，`DELETE groups/{id}?confirm=true`（见 5.3），`POST groups/{id}/select {name}`，`POST groups/{id}/delay {url?, timeout?}`（毫秒，默认 5000）返回 `{delays: {成员: 毫秒}}`。
   - `GET final` 返回 `{version, members, selected, empty}`。`PUT final {members?, selected?}`：成员变了走应用事务；只改选中项走 Clash API。
-  - `GET settings` 返回 `{version, fakeip_range, resolver, resolver_effective, mixed_port}`，`PUT settings` 改其中任意几项。
-  - `GET status`：`atomdns.version`；`singbox.running`、`version`（Clash API 的 `/version`）、`in_sync`（运行中的文件是否就是当前状态生成的）、`host`；`last_apply`；`warnings.empty_groups`；`nft`（4.6、9.4：`fakeip_range`、`ip_cidr`、表名 `table`、最近一次更新集合的结果 `sync`）。`GET apply` 返回 `last_apply` 和 `in_sync`，`POST apply` 用新密钥重新应用一次。`last_apply` 是 `{at, trigger, ok, changed, error?}`，`trigger` 是 `nodes`、`groups`、`final`、`settings`、`rules`、`apply`、`startup` 之一，在进程内跨配置重载保留。
+  - `GET settings` 返回 `{version, fakeip_range, resolver, resolver_effective, mixed_port, direct_ttl_max, fakeip_ttl_max}`，`PUT settings` 改其中任意几项（TTL 上限是第 5 步加的，见 4.5）。
+  - `GET status`：`atomdns.version`；`singbox.running`、`version`（Clash API 的 `/version`）、`in_sync`（运行中的文件是否就是当前状态生成的）、`host`；`last_apply`；`bindings`（绑定账本，第 5 步，见 4.5.1）；`warnings.empty_groups`；`nft`（4.6、9.4：`fakeip_range`、`ip_cidr`、表名 `table`、最近一次更新集合的结果 `sync`）。`GET apply` 返回 `last_apply` 和 `in_sync`，`POST apply` 用新密钥重新应用一次。`last_apply` 是 `{at, trigger, ok, changed, error?}`，`trigger` 是 `nodes`、`groups`、`final`、`settings`、`rules`、`apply`、`startup` 之一，在进程内跨配置重载保留。
   - 写操作都可以带 `version`（请求体，DELETE 用 `?version=`），和节点状态的版本比较。sing-box check 不通过 400，重载或确认失败 502（已回滚），一次应用进行中 409。
   - 写操作占用管理租约，`PUT settings` 例外：它自己拿租约，只覆盖 sing-box 的部分，因为改 mixed 端口要重新加载 AtomDNS 配置，而重新加载要等所有租约结束。
 - 错误格式沿用 AtomDNS 现有的格式。**[定]**
@@ -388,7 +417,7 @@ atom/
 2. **规则表**（已完成，实现见 4.7）：模型、首条命中匹配插件、`rules` API、拖动、`rules/test`；规则命中"代理"时发 SET。另外做了 `ruleset` 条件的全部三种来源（内置、远程 URL、本地列表）和 `rulesets` API。**[定]** 还没做：远程规则集的定时自动更新（现在只能手动 `refresh`）。
 3. **sing-box 配置生成**（已完成，2026-11-09 收尾，经过三轮 codex 复审；实现见 4.6、5.3、第 6 节）：节点导入（JSON/YAML/链接）、节点组、Final、事务式应用和回滚；7890 按规则分流，包括 sing-box 补丁里 resolve 之后查绑定的那一处。还没做：nft 规则（第 4、7 步）、systemd 单元文件（第 7 步）。
 4. **联调**（已完成，2026-11-09；实现和定下的事见 4.6、9.4，规则见 [deploy-nft.md](deploy-nft.md)）：在 mosdns-rust 上用临时 systemd 单元跑 atomdns 和补丁版 sing-box，客户端用 netns 模拟，单网卡旁路由和双网卡网关两种形态都实测。验证通过的：DNS（代理规则 → FakeIP 且 sing-box 收到 SET，AAAA 空应答也带 SET；直连 → 真实 IP；屏蔽 → 空应答；没命中的国外域名 → FakeIP + CLEAR；国内域名 → 真实 IP；EDNS 选项用抓包核对）；TCP 经 redirect、UDP 经 TProxy（NTP、DNS）进 sing-box，从绑定的组或 Final 出去，UDP 回包源地址是 FakeIP；IP 规则（TCP、UDP、屏蔽，启用/停用时 nft 集合跟着变）；7890 按规则分流；拖动排序和改组立即生效，删掉代理规则后下一次查询重新发 CLEAR（缓存已清）；sing-box 重启后不重新查 DNS 绑定仍在；atomdns 重启后规则、节点、组、Final 不变，启动检查不重载 sing-box，nft 表重新加载并填好；`sing-box check` 不通过返回 400 什么都不动；mixed 端口被占时重载失败返回 502 并回滚，sing-box 进程不退出（PID 不变），期间 7890 请求 40/40 成功；网关形态下其他流量经 NAT 转发、不进 sing-box。联调中修的：UDP 53 写回（9.4）。codex 复审三轮：第 1、2 轮的两条 MAJOR（应用失败回滚、保存失败补偿后 nft 没跟上运行中的配置）已修；第 3 轮的一条（补偿时重载也失败）按已知限制处理，见 9.4 和 deploy-nft.md 第 8 节。没做：真实主路由下的单网卡形态、真实节点。
-5. **绑定账本和缓存失效**（4.5）。
+5. **绑定账本和缓存失效**（已完成，2026-11-09；实现见 4.5.1）：绑定账本（SET 和 CLEAR 都记，LRU 16384 条，规则或规则集改动、确认删组后同步重算，有变化的直接发给 sing-box 的 `dns-in`，改 FakeIP 网段时清空）；直连应答 TTL 上限 `direct_ttl_max`（默认 300 秒）和 FakeIP 应答 TTL 上限 `fakeip_ttl_max`（默认 1 秒）。验证（mosdns-rust，第 4 步的临时环境，atomdns 换成第 5 步的调试版，通过运行时的 systemd drop-in 指向 `/root/atom-step5/bin`，没有永久替换）：客户端拿着 FakeIP 不重新查询，规则从组 X 改成组 Y 后连接从 Y 出去，抓包看到账本发出 SET Y；删掉代理规则后 sing-box 收到 CLEAR，同一个 FakeIP 走 Final；代理改直连、改屏蔽分别发 SET direct、SET block，同一个 FakeIP 立即直连、被拒；原判断走 Final 的国外域名加了代理规则后，同一个 FakeIP 改走新组；确认删组后发 SET final；sing-box 重启后绑定仍在；改 FakeIP 网段后账本清空；FakeIP 应答 TTL 是 1，改 `fakeip_ttl_max` 后跟着变；直连应答（上游 TTL 86400）封顶到 300，改 `direct_ttl_max` 后跟着变，UDP、TCP 和缓存命中都一样；改 TTL 设置不重载 sing-box。全量 `cargo test --workspace` 1635 个通过、0 失败。
 6. **简易 WebUI + OpenAPI 规范定稿**。
 7. **安装器**。
 
