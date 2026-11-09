@@ -164,7 +164,14 @@ ExecStartPre=/usr/lib/atom/policy-route.sh
 
 结果都符合预期，详见 design.md 第 11 节第 4 条。单网卡和网关两种形态都实测过；第 5 节的主路由风险没有实测条件。
 
-## 8. 卸载
+## 8. 已知限制
+
+- **补偿时重载失败，nft 和 sing-box 不一致**（codex 第 3 轮复审指出，决定记为限制、不改代码）。
+  - 触发条件：要同时出现两次失败。先是一次修改已经应用到 sing-box，但保存 atom 的文件失败；接着补偿时旧的 `config.json` 写回成功，重载命令却失败了，没能让 sing-box 换回旧配置。
+  - 表现：sing-box 还在跑新配置，nft 集合却按写回的旧文件更新了。新 FakeIP 网段或新 IP 规则的流量不再被导进 sing-box。接口返回 500，错误里写"已写回旧配置，但重载后没有确认"；`GET status` 的 `singbox.in_sync` 显示不一致。
+  - 恢复：再应用一次，任意一次成功的修改都行，或者 `POST /api/v1/atom/apply`。应用成功后 sing-box 和 nft 都回到 atom 的状态。
+
+## 9. 卸载
 
 ```sh
 nft delete table inet atom
