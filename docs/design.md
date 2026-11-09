@@ -232,10 +232,12 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 
 - **规则字段**：`dns`（上游组的 tag：`domestic`、`foreign`、`foreignecs`，或自定义组）和 `cache`（默认 true）。只能用在直连规则上，其他动作带了返回 400；组不存在 400。不带 `dns` 且开缓存，就是原来的直连流程（国内组、`cache_cn`、学习"无 V6"等），不变。
 - **上游组**：YAML 里的 aliapi 插件（`nocnfake` 除外）加上自定义组。自定义组存在 AtomDNS 的 `webinfo/settings.json`（`atom_groups`：tag 和名字；上游列表在 `upstreams[tag]`），编译配置时生成同名的 aliapi 插件（`config/atom_routes.rs`），和内置组一样同时问全部启用的上游、取最先成功的应答，`use_proxy` 的条目经 `main_proxy`。tag 是 `u-` 加 8 位十六进制；名字最长 32 个字符。接口：`POST upstreams {name, upstreams}`（201，带新 tag）、`PUT upstreams/{tag}` 可以带 `name` 改名（内置组 400；自定义组不能给空列表）、`DELETE upstreams/{tag}`（内置组 400；被规则的 `dns` 引用时 409，带规则 ID）。这三个和 `PUT dns` 一样发布新一代 AtomDNS 配置，不占管理租约。
-- **分派**：`atom_rules` 的 marks 加 `route`（自带配置 43）。编译时按上游组生成序列 `atom_direct`：第 i 个组有两个数字 mark，`70000+2i` 先过规则缓存 `cache_atom` 再问这个组，`70001+2i` 直接问；组和 mark 的对应表作为 `routes` 参数交给 `atom_rules`（YAML 里写 `routes` 会被拒绝）。规则命中时打 fast_mark 43 和对应的数字 mark，主流程和刷新流程在 fast_mark 42 之前加一支 `fast_mark 43 → [$atom_direct, exit]`。这些插件只存在于编译出的配置里，不写文件；所以加组、删组只是改设置，改规则永远不用重新发布配置。
-- **缓存**：开缓存的路由经过 `cache_atom`；规则变化时所有缓存照常清空（4.5），所以换了组不会拿到旧组的应答。`cache: false` 的查询不经过任何缓存（规则表在全局缓存之前，原判断的缓存也走不到）。
+- **分派**：`atom_rules` 的 marks 加 `route`（自带配置 43）。编译时按上游组生成序列 `atom_direct`：第 i 个组有两个数字 mark，`70000+2i` 先过这个组自己的规则缓存 `cache_atom_<组>` 再问这个组，`70001+2i` 直接问；两种都先写审计标签（`flow_setter`），缓存命中也记得是哪个组；组和 mark 的对应表作为 `routes` 参数交给 `atom_rules`（YAML 里写 `routes` 会被拒绝）。规则命中时打 fast_mark 43 和对应的数字 mark，主流程和刷新流程在 fast_mark 42 之前加一支 `fast_mark 43 → [$atom_direct, exit]`。这些插件只存在于编译出的配置里，不写文件；所以加组、删组只是改设置，改规则永远不用重新发布配置。
+- **缓存**：YAML 里的 `cache_atom` 只是模板，每个组复制一份（`cache_atom_<组>`，转储文件也各自一份），模板本身不编译。分开是因为带客户端条件的规则可以让同一个域名对不同客户端走不同的组，共用缓存会把一个组的应答给另一个组的客户端（codex 6b-2a 第 1 轮）。规则变化时所有缓存照常清空（4.5）。`cache: false` 的查询不经过任何缓存（规则表在全局缓存之前，原判断的缓存也走不到）。
 - **DDNS**：写成"直连 + 上游组 + 不缓存"的规则，放在规则表最前面，和原来"排在规则表之前的固定项"等价。默认规则表不带 DDNS 规则。原来的"国外失败回退国内"不再提供。
 - **账本**：直连不管走哪个组，绑定都是 SET direct（4.5.1），不受影响。
+- **和配置发布的并发**（codex 6b-2a 第 1 轮）：编译配置时读到的 `atom_rules.json`、`atom_rulesets.json`、`atom_proxy.json` 记进编译输入的指纹。发布新一代配置（`PUT dns`、上游组的改动）编译期间如果有规则或节点的写入落盘，提交时指纹对不上，这次发布返回 409，不会装上编译时读到的旧表；所以删组时的引用检查和随后的规则写入之间不会留下引用不存在的组的规则。
+- **退役开关**：`settings.json` 里存着的 `ddns_foreign` 被忽略（下次写设置时去掉），不会让配置加载失败。
 
 ## 5. 节点与节点组
 
