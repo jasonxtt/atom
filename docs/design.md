@@ -148,7 +148,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 #### 4.5.1 实现（第 5 步）**[定]**
 
 - **账本**（`rust/native-host/src/atom_ledger.rs`）：键是查询问题段里的原名字（wire 形式，保留大小写，sing-box 按原样保存绑定），值是 SET 某个标签或 CLEAR。容量固定 16384 条，不对用户开放，最久没有记录的先淘汰。账本是进程级的，AtomDNS 重新加载配置时不丢，进程重启后为空。
-- **记录**：`ForwardCatalog` 发往 `nocnfake` 的查询拿到 sing-box 的应答后，按带的指令记一条（SET 组，或者 CLEAR）。账本自己发的指令被确认后也更新。SET 和 CLEAR 都记：原判断判成国外的域名也在账本里，用户给它加了规则以后，客户端手里的 FakeIP 立即跟着走。
+- **记录**：`ForwardCatalog` 发往 `nocnfake` 的 A 查询拿到 sing-box 的应答后，按带的指令记一条（SET 组，或者 CLEAR）。AAAA 不记：sing-box 的 FakeIP 只有 IPv4 网段，它对 AAAA 直接返回空应答，根本不读指令，记了会让账本以为 sing-box 已经换了绑定（codex 第 1 轮）。账本自己发的指令被确认后也更新。SET 和 CLEAR 都记：原判断判成国外的域名也在账本里，用户给它加了规则以后，客户端手里的 FakeIP 立即跟着走。
 - **重算**：对账本里的每个域名，用新规则表重新判断。客户端按"不属于任何客户端条件"处理，带 `client` 条件的规则一律不命中：这类规则只能是直连或屏蔽，命中它的查询不会发给 sing-box，所以 sing-box 里的全局绑定反映的是其他客户端得到的结论（4.2）。内置规则集的 fast_flags 按 mapper 现场算，和 `rules/test` 一样。新结论对应的指令：
   - 代理 → 组 Y：SET Y；
   - 直连：SET `direct`；屏蔽：SET `block`（生成的配置里都有这两个出站），客户端手里的 FakeIP 立即直连或被拒，直连时由 sing-box 用 resolver 解析域名；
@@ -172,6 +172,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
   - 竞态：重算的同时，还在用旧规则表处理的查询可能比账本的指令晚到 sing-box，把绑定写回旧值。时间窗口就是一次查询的耗时。
   - 带客户端条件的规则加上之前，那个客户端已经拿到的 FakeIP，在过期前仍按全局绑定走（sing-box 不区分客户端）。
   - 不经过 atom API 的变化，比如 AdGuard、geosite 的在线更新，既不清缓存，也不触发重算。
+  - 重算只看规则表，不模拟排在它前面的系统固定项（重写/hosts、类型屏蔽、DDNS，见 3.1）。如果某个记在账本里的域名后来被加了重写或 DDNS，之后再改规则时，账本照样按规则表给它发指令；而客户端重新查询时，会先命中固定项，根本到不了规则表。受影响的只是客户端手里那个旧 FakeIP 的出口，FakeIP 的 TTL 是 1 秒，客户端很快会重新查询并拿到重写或 DDNS 的结果。固定项不经过 atom 的规则 API，第 6 步并入控制面时再一起处理（codex 第 1 轮，记为限制）。
 
 ### 4.6 IP 规则
 
@@ -190,7 +191,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 - **插件**：`atom_rules`（`rust/native-host/src/atom_rules.rs`，配置在 `atomdns/config/sub_config/atom_rules.yaml`）。它是一个 fixture，只给查询打动作标记：屏蔽 fast_mark 40、代理 41、直连 42；代理时另外把组写进 `ExecutionState::outbound`。主流程按标记分派，所以执行顺序仍写在 YAML 里。匹配复用 `matcher-core`：域名条件用 `MixSet`（full/domain 用排序池，regex、keyword 照旧），客户端用 `IpPrefixList`。规则逐条按顺序判断，第一条命中的生效。
 - **位置**：重写、类型屏蔽、`unified_matcher1` 打标、IPv4 优先、DDNS 之后，原判断之前。原来排在前面的"记忆无 V4/V6"空答和黑名单屏蔽挪到规则表后面：否则一个被代理的域名如果曾经学到"无 V4"，会直接拿到空应答；直连规则也盖不过黑名单。刷新流程 `sequence_requery` 用同样的顺序。**[定]**
 - **动作**：
-  - 代理 → 组 X：A/AAAA 走 `$sequence_fakeip_exit`，向 sing-box 要 FakeIP，查询带 SET X，不问国内外 DNS；其他类型（MX、TXT 等）问国外 DNS，和灰名单在 `process_ot.yaml` 里的做法一样。AAAA 也发给 sing-box（同一个 SET），sing-box 只配了 IPv4 网段，返回空。
+  - 代理 → 组 X：A/AAAA 走 `$sequence_fakeip_exit`，向 sing-box 要 FakeIP，查询带 SET X，不问国内外 DNS；其他类型（MX、TXT 等）问国外 DNS，和灰名单在 `process_ot.yaml` 里的做法一样。AAAA 也发给 sing-box（同一个 SET），sing-box 只配了 IPv4 网段，返回空。注意（第 5 步 codex 复审时核对 sing-box 源码）：没开 IPv6 网段时，sing-box 在读指令之前就返回了空应答，所以 AAAA 带的 SET 实际不生效，只有 A 查询会改绑定。
   - 直连：A/AAAA 走 `$sequence_local_exit`（国内 DNS，真实 IP），其他类型走 `$sequence_local`；兼容模式和安全模式都问国内，因为这是用户明确指定的。
   - 屏蔽：`reject 0`，即 NOERROR 空应答。**[定]**
 - **审计**：命中的规则写进 `domain_set`（`规则:<备注或 ID>`）和 `matched_rule_source`（`atom_rule:<ID>`）。
