@@ -45,10 +45,10 @@ FakeIP 流量 ─>│ FakeIP 还原域名 → 绑定的出口 / route.final → 
 ### 3.1 查询路径
 
 ```text
-1. 系统固定项        重写/hosts、本地 PTR、类型屏蔽（SOA/PTR/HTTPS）、DDNS   不可拖动
+1. 系统固定项        重写/hosts、本地 PTR、类型屏蔽（SOA/PTR/HTTPS）       不可拖动
 2. 用户规则表        有序，第一条命中就生效，可拖动                      见第 4 节
      代理 → 组 X     直接返回 FakeIP，EDNS SET X；不问国内外 DNS
-     直连            问国内 DNS，返回真实 IP
+     直连            问国内 DNS（或规则指定的上游组），返回真实 IP
      屏蔽            返回空应答或 NXDOMAIN
 3. 原国内外判断      AtomDNS 现有的 compat/safe 流程、域名学习、geosite/geoip
      国外 → FakeIP，EDNS CLEAR，由 sing-box 的 route.final（Final 组）处理
@@ -67,7 +67,7 @@ FakeIP 流量 ─>│ FakeIP 还原域名 → 绑定的出口 / route.final → 
 | 3 `unified_matcher1` 名单打标 | 用户维护的名单改由规则表表达：`realiplist`、`cnfakeipfilter` 第 1 步删除；黑名单、白名单、灰名单第 6 步删除，用户自己写规则；`cuscn`、`cusnocn` 第 6 步成为规则表的内置规则集（4.4）。`geosite_cn` / `geosite_no_cn` 和学习结果留给第 3 层的原判断 **[定]** |
 | 4/6 专属分流组 | 删除（第 1 步删配置，第 6 步删代码）**[定]** |
 | 5 黑名单、广告 | 广告变成规则表里的普通规则，可以拖动（见 4.4）；第 2 步删掉了固定的广告屏蔽步骤和 `block_ads` 开关。黑名单屏蔽第 6 步删除（4.4）**[定]** |
-| 7 DDNS | 保留现有的 DDNS 名单和流程（不缓存，`ddns_foreign` 开关保留），名单在控制面编辑。**[定]** 放在系统固定项里、排在规则表之前。**[建议]** |
+| 7 DDNS | 第 6 步保留为系统固定项（名单在控制面编辑）；第 6b 步删除，写成规则：直连 + 上游组 + 不缓存，放在规则表最前面（4.8）。名单、mark 6 的三支分支、`ddns_foreign` 开关和 `ddns` 接口都删掉 **[定]** |
 | 8 指定客户端直连 | 变成规则条件"来源客户端"（见 4.2）；`client_routing` 开关、`client_ip` 名单和这两个分支第 6 步删除 **[定]** |
 | 9 全局缓存 | 保留，排在规则表后面；规则变化时清空（见 4.5） |
 | 10/11 名单内、名单外 | 保留，成为第 3 层的原判断 |
@@ -97,6 +97,8 @@ Rule {
   remark      备注（显示用）
   match       匹配条件，见 4.2（client_invert：客户端条件取反，第 6 步）
   action      proxy(group_id) | direct | block
+  dns         直连规则可选：上游组（第 6b 步，4.8）
+  cache       直连规则可选：false 时不经过任何缓存（第 6b 步，4.8）
 }
 ```
 
@@ -187,7 +189,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
   - 竞态：重算的同时，还在用旧规则表处理的查询可能比账本的指令晚到 sing-box，把绑定写回旧值。时间窗口就是一次查询的耗时。
   - 带客户端条件的规则加上之前，那个客户端已经拿到的 FakeIP，在过期前仍按全局绑定走（sing-box 不区分客户端）。
   - 不经过 atom API 的变化，比如 AdGuard、geosite 的在线更新，既不清缓存，也不触发重算。
-  - 重算只看规则表，不模拟排在它前面的系统固定项（重写/hosts、类型屏蔽、DDNS，见 3.1）。如果某个记在账本里的域名后来被加了重写或 DDNS，之后再改规则时，账本照样按规则表给它发指令；而客户端重新查询时，会先命中固定项，根本到不了规则表。受影响的只是客户端手里那个旧 FakeIP 的出口，FakeIP 的 TTL 是 1 秒，客户端很快会重新查询并拿到重写或 DDNS 的结果。（codex 第 1 轮，记为限制。）第 6 步把 DDNS 名单和重写规则开放到了控制面（`ddns`、`rewrite`，第 8 节），重算仍然不模拟它们，改它们也不触发重算，这条限制保留。
+  - 重算只看规则表，不模拟排在它前面的系统固定项（重写/hosts、类型屏蔽，见 3.1）。如果某个记在账本里的域名后来被加了重写，之后再改规则时，账本照样按规则表给它发指令；而客户端重新查询时，会先命中固定项，根本到不了规则表。受影响的只是客户端手里那个旧 FakeIP 的出口，FakeIP 的 TTL 是 1 秒，客户端很快会重新查询并拿到重写的结果。（codex 第 1 轮，记为限制。）第 6 步把重写规则开放到了控制面（`rewrite`，第 8 节），重算仍然不模拟它，改它也不触发重算，这条限制保留。DDNS 第 6b 步成了规则，账本按规则表正常重算（直连 → SET direct）。
 
 ### 4.6 IP 规则
 
@@ -204,7 +206,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 ### 4.7 实现（第 2 步）
 
 - **插件**：`atom_rules`（`rust/native-host/src/atom_rules.rs`，配置在 `atomdns/config/sub_config/atom_rules.yaml`）。它是一个 fixture，只给查询打动作标记：屏蔽 fast_mark 40、代理 41、直连 42；代理时另外把组写进 `ExecutionState::outbound`。主流程按标记分派，所以执行顺序仍写在 YAML 里。匹配复用 `matcher-core`：域名条件用 `MixSet`（full/domain 用排序池，regex、keyword 照旧），客户端用 `IpPrefixList`。规则逐条按顺序判断，第一条命中的生效。
-- **位置**：重写、类型屏蔽、`unified_matcher1` 打标、IPv4 优先、DDNS 之后，原判断之前。原来排在前面的"记忆无 V4/V6"空答和黑名单屏蔽挪到规则表后面：否则一个被代理的域名如果曾经学到"无 V4"，会直接拿到空应答；直连规则也盖不过黑名单。刷新流程 `sequence_requery` 用同样的顺序。**[定]**
+- **位置**：重写、类型屏蔽、`unified_matcher1` 打标、IPv4 优先之后，原判断之前（第 6b 步前，DDNS 也在规则表前面）。原来排在前面的"记忆无 V4/V6"空答和黑名单屏蔽挪到规则表后面：否则一个被代理的域名如果曾经学到"无 V4"，会直接拿到空应答；直连规则也盖不过黑名单。刷新流程 `sequence_requery` 用同样的顺序。**[定]**
 - **动作**：
   - 代理 → 组 X：A/AAAA 走 `$sequence_fakeip_exit`，向 sing-box 要 FakeIP，查询带 SET X，不问国内外 DNS；其他类型（MX、TXT 等）问国外 DNS，和灰名单在 `process_ot.yaml` 里的做法一样。AAAA 也发给 sing-box（同一个 SET），sing-box 只配了 IPv4 网段，返回空。注意（第 5 步 codex 复审时核对 sing-box 源码）：没开 IPv6 网段时，sing-box 在读指令之前就返回了空应答，所以 AAAA 带的 SET 实际不生效，只有 A 查询会改绑定。
   - 直连：A/AAAA 走 `$sequence_local_exit`（国内 DNS，真实 IP），其他类型走 `$sequence_local`；兼容模式和安全模式都问国内，因为这是用户明确指定的。
@@ -223,6 +225,17 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 - **group_id**（第 2 步）：校验格式：非空、没有首尾空白和控制字符、最长 64 字节。没有 `singbox` 段时只做这一项。
 - **ip_cidr**：第 3 步实现，见 4.6。
 - **group_id**（第 3 步）：配置了 `singbox` 段时，代理规则的 `group_id` 必须是存在的节点组或 `final`（Final），否则 400；加载时文件里引用了不存在的组同样按文件损坏处理。
+
+### 4.8 规则的 DNS 上游（第 6b 步）**[定]**
+
+用户定的：直连规则可以选一个上游组，不做"多选几个上游"；要一组特定的上游，就新建一个只放它们的上游组。代理规则的上游固定是 FakeIP，屏蔽规则不查上游。
+
+- **规则字段**：`dns`（上游组的 tag：`domestic`、`foreign`、`foreignecs`，或自定义组）和 `cache`（默认 true）。只能用在直连规则上，其他动作带了返回 400；组不存在 400。不带 `dns` 且开缓存，就是原来的直连流程（国内组、`cache_cn`、学习"无 V6"等），不变。
+- **上游组**：YAML 里的 aliapi 插件（`nocnfake` 除外）加上自定义组。自定义组存在 AtomDNS 的 `webinfo/settings.json`（`atom_groups`：tag 和名字；上游列表在 `upstreams[tag]`），编译配置时生成同名的 aliapi 插件（`config/atom_routes.rs`），和内置组一样同时问全部启用的上游、取最先成功的应答，`use_proxy` 的条目经 `main_proxy`。tag 是 `u-` 加 8 位十六进制；名字最长 32 个字符。接口：`POST upstreams {name, upstreams}`（201，带新 tag）、`PUT upstreams/{tag}` 可以带 `name` 改名（内置组 400；自定义组不能给空列表）、`DELETE upstreams/{tag}`（内置组 400；被规则的 `dns` 引用时 409，带规则 ID）。这三个和 `PUT dns` 一样发布新一代 AtomDNS 配置，不占管理租约。
+- **分派**：`atom_rules` 的 marks 加 `route`（自带配置 43）。编译时按上游组生成序列 `atom_direct`：第 i 个组有两个数字 mark，`70000+2i` 先过规则缓存 `cache_atom` 再问这个组，`70001+2i` 直接问；组和 mark 的对应表作为 `routes` 参数交给 `atom_rules`（YAML 里写 `routes` 会被拒绝）。规则命中时打 fast_mark 43 和对应的数字 mark，主流程和刷新流程在 fast_mark 42 之前加一支 `fast_mark 43 → [$atom_direct, exit]`。这些插件只存在于编译出的配置里，不写文件；所以加组、删组只是改设置，改规则永远不用重新发布配置。
+- **缓存**：开缓存的路由经过 `cache_atom`；规则变化时所有缓存照常清空（4.5），所以换了组不会拿到旧组的应答。`cache: false` 的查询不经过任何缓存（规则表在全局缓存之前，原判断的缓存也走不到）。
+- **DDNS**：写成"直连 + 上游组 + 不缓存"的规则，放在规则表最前面，和原来"排在规则表之前的固定项"等价。默认规则表不带 DDNS 规则。原来的"国外失败回退国内"不再提供。
+- **账本**：直连不管走哪个组，绑定都是 SET direct（4.5.1），不受影响。
 
 ## 5. 节点与节点组
 
@@ -336,7 +349,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 
 第 6 步定下的 **[定]**：AtomDNS 这一侧的开放项不进 `settings`，单独两个资源。原因：`settings` 写 `atom_proxy.json`、走 sing-box 应用事务；这些项写 `webinfo/settings.json`、发布 AtomDNS 的新一代配置，放在一个 PUT 里会一半成功一半失败。
 
-- `GET/PUT dns`：`core_mode`、`block_qtypes`（SOA/PTR/HTTPS）、`block_aaaa`、`prefer_v4`、`ddns_foreign`（3.2）、`full_cache`、`lazy_cache`（只开放开关，缓存容量用 YAML 的默认值）、`ecs`（国外查询带的 ECS 地址，空串恢复默认）、`learning`（`enabled`、`remember_direct`、`remember_proxy`、`no_v4`、`no_v6`；关掉的学习名单随即清空）。改 `core_mode` 会启动一次 requery。
+- `GET/PUT dns`：`core_mode`、`block_qtypes`（SOA/PTR/HTTPS）、`block_aaaa`、`prefer_v4`、`full_cache`、`lazy_cache`（只开放开关，缓存容量用 YAML 的默认值）、`ecs`（国外查询带的 ECS 地址，空串恢复默认）、`learning`（`enabled`、`remember_direct`、`remember_proxy`、`no_v4`、`no_v6`；关掉的学习名单随即清空）。改 `core_mode` 会启动一次 requery。
 - `GET upstreams`、`PUT upstreams/{tag}`：国内（`domestic`）、国外（`foreign`）、国外带 ECS（`foreignecs`）三组上游，条目是 AtomDNS 原有的上游条目（`use_proxy` 就是 7.1 说的按上游关闭代理）；FakeIP 组（`nocnfake`）不出现，也改不了。至少保留一个启用的条目；空列表恢复配置的默认列表。
 - 这两个资源不带 `version`，后写的覆盖先写的。
 - 其余开关不开放：`block_empty` 用默认值；`client_routing` 删除，改用规则表的客户端条件（4.2）。
@@ -365,7 +378,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 | `settings` | 读取、修改 sing-box 一侧的设置和 TTL 上限 |
 | `dns` | 读取、修改 AtomDNS 一侧的开放项（7.2，第 6 步） |
 | `upstreams` | 列出上游组，整组替换一组的上游（7.2，第 6 步） |
-| `ddns`、`rewrite` | 系统固定项：DDNS 名单、重写（hosts）规则，整份读取和替换（第 6 步） |
+| `rewrite` | 系统固定项：重写（hosts）规则，整份读取和替换（第 6 步；`ddns` 第 6b 步删除） |
 | `status` | 两个进程的版本、运行状态、最近一次应用 sing-box 配置的结果 |
 | `apply` | 查询最近一次变更的应用结果（见下） |
 
@@ -386,9 +399,9 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
   - `GET status`：`atomdns.version`；`singbox.running`、`version`（Clash API 的 `/version`）、`in_sync`（运行中的文件是否就是当前状态生成的）、`host`；`last_apply`；`bindings`（绑定账本，第 5 步，见 4.5.1）；`warnings.empty_groups`；`nft`（4.6、9.4：`fakeip_range`、`ip_cidr`、表名 `table`、最近一次更新集合的结果 `sync`）。`GET apply` 返回 `last_apply` 和 `in_sync`，`POST apply` 用新密钥重新应用一次。`last_apply` 是 `{at, trigger, ok, changed, error?}`，`trigger` 是 `nodes`、`groups`、`final`、`settings`、`rules`、`apply`、`startup` 之一，在进程内跨配置重载保留。
   - 写操作都可以带 `version`（请求体，DELETE 用 `?version=`），和节点状态的版本比较。sing-box check 不通过 400，重载或确认失败 502（已回滚），一次应用进行中 409。
   - 写操作占用管理租约，`PUT settings` 例外：它自己拿租约，只覆盖 sing-box 的部分，因为改 mixed 端口要重新加载 AtomDNS 配置，而重新加载要等所有租约结束。
-- `dns`、`upstreams`、`ddns`、`rewrite`（`rust/native-host/src/atom_dns_api.rs`，第 6 步）：
+- `dns`、`upstreams`、`rewrite`（`rust/native-host/src/atom_dns_api.rs`，第 6 步；`ddns` 第 6b 步删除，上游组的新建、改名、删除第 6b 步加上，见 4.8）：
   - `GET dns` / `PUT dns` 见 7.2；返回改后的全部字段。`GET upstreams` 返回 `{groups: [{tag, customized, upstreams}]}`，`PUT upstreams/{tag} {upstreams}` 返回同样的结构。这两个写操作不占管理租约（理由同 `PUT settings`：发布新一代配置要等所有租约结束），没有 `version`；发布期间别的请求可能拿到 503，重试即可。已知限制（第 6 步联调发现，AtomDNS 原有行为）：新装时 AdGuard 规则文件还没下载下来，加了节点以后后台下载才成功；下载如果正好落在新一代配置编译和提交之间，提交时发现输入文件变了，返回 409（`managed input changed externally`），什么都没改，重试一次即可。
-  - `GET ddns` / `GET rewrite` 返回 `{entries}`；`PUT` 同样的 `{entries}` 整份替换：先校验，再写文件，最后生效（重写原来是先改内存再写文件，写失败时内存和文件不一致，改掉了），然后清空所有缓存。DDNS 条目和名单文件同格式；重写一行是"域名规则 + IP 或目标域名"。codex 第 1 轮复审后补的：`ddns` 要等名单和用到它的 mapper 都重建完才返回（重建正在进行时只会被标记为再建一次，原来会提前返回）；重写文件记进配置编译的输入指纹，`PUT dns` 等发布新一代配置时，如果重写文件在编译之后被改过，提交时返回 409，不会把旧的重写规则装回去。重写插件配置了多个文件时 `PUT rewrite` 返回 409，不整份替换（只写第一个文件的话，其余文件的规则下次加载会回来；codex 第 2 轮）。atom 自带的配置只有一个文件。`PUT ddns` 同样只在名单恰好来自一个 `.txt` 文件、没有内联 `exps` 时才能整份替换，否则 409；单条 64 KiB 以上（加载器的上限）400；写进文件但重建失败（仍在用旧规则）时 500，不再报成功（codex 第 3 轮）。上游条目的 `protocol` 在规范里是必填，和代码一致，有测试按规范的必填字段核对。
+  - （`ddns` 的内容是第 6 步时的记录，第 6b 步已删除。）`GET ddns` / `GET rewrite` 返回 `{entries}`；`PUT` 同样的 `{entries}` 整份替换：先校验，再写文件，最后生效（重写原来是先改内存再写文件，写失败时内存和文件不一致，改掉了），然后清空所有缓存。DDNS 条目和名单文件同格式；重写一行是"域名规则 + IP 或目标域名"。codex 第 1 轮复审后补的：`ddns` 要等名单和用到它的 mapper 都重建完才返回（重建正在进行时只会被标记为再建一次，原来会提前返回）；重写文件记进配置编译的输入指纹，`PUT dns` 等发布新一代配置时，如果重写文件在编译之后被改过，提交时返回 409，不会把旧的重写规则装回去。重写插件配置了多个文件时 `PUT rewrite` 返回 409，不整份替换（只写第一个文件的话，其余文件的规则下次加载会回来；codex 第 2 轮）。atom 自带的配置只有一个文件。`PUT ddns` 同样只在名单恰好来自一个 `.txt` 文件、没有内联 `exps` 时才能整份替换，否则 409；单条 64 KiB 以上（加载器的上限）400；写进文件但重建失败（仍在用旧规则）时 500，不再报成功（codex 第 3 轮）。上游条目的 `protocol` 在规范里是必填，和代码一致，有测试按规范的必填字段核对。
   - 重算账本不模拟这两项（4.5.1 已知限制），改它们不触发重算。
 - 内置规则集：`GET rulesets` 里是 `{id, name, type: builtin, refreshable}`；`POST rulesets/{id}/refresh` 返回 `{id, sources, updated}`，一个来源都没下载成功时 502、列表不变。同一个来源正在下载（启动时的下载、另一次刷新）时先等它结束，再下载一次（codex 第 1 轮）。
 - 错误格式沿用 AtomDNS 现有的格式。**[定]**
