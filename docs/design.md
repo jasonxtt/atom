@@ -68,7 +68,7 @@ FakeIP 流量 ─>│ FakeIP 还原域名 → 绑定的出口 / route.final → 
 | 4/6 专属分流组 | 删除（第 1 步删配置，第 6 步删代码）**[定]** |
 | 5 黑名单、广告 | 广告变成规则表里的普通规则，可以拖动（见 4.4）；第 2 步删掉了固定的广告屏蔽步骤和 `block_ads` 开关。黑名单屏蔽第 6 步删除（4.4）**[定]** |
 | 7 DDNS | 保留现有的 DDNS 名单和流程（不缓存，`ddns_foreign` 开关保留），名单在控制面编辑。**[定]** 放在系统固定项里、排在规则表之前。**[建议]** |
-| 8 指定客户端直连 | 变成规则条件"来源客户端"（见 4.2） |
+| 8 指定客户端直连 | 变成规则条件"来源客户端"（见 4.2）；`client_routing` 开关、`client_ip` 名单和这两个分支第 6 步删除 **[定]** |
 | 9 全局缓存 | 保留，排在规则表后面；规则变化时清空（见 4.5） |
 | 10/11 名单内、名单外 | 保留，成为第 3 层的原判断 |
 
@@ -95,7 +95,7 @@ Rule {
   id          不可变 ID
   enabled     是否启用
   remark      备注（显示用）
-  match       匹配条件，见 4.2
+  match       匹配条件，见 4.2（client_invert：客户端条件取反，第 6 步）
   action      proxy(group_id) | direct | block
 }
 ```
@@ -114,6 +114,13 @@ Rule {
 一条规则内部是"或"还是"与"：**[定]** 同一类条件之间是"或"，不同类之间是"与"。比如"suffix google.com 或 youtube.com，并且客户端是 192.168.1.50"。
 
 "类"的划分（第 2 步实现时定下）：`domain`、`suffix`、`keyword`、`regex`、`ruleset` 都是域名条件，算同一类；`client` 是第二类；`ip_cidr` 由 sing-box 匹配（4.6）。所以"domain a.com，ruleset 广告"表示 a.com 或广告域名。只有 `client` 条件的规则匹配这个客户端的所有域名。规则至少要有一个条件。
+
+客户端条件取反（第 6 步，用户定的）**[定]**：`match.client_invert` 为 true 时，"客户端不在 `client` 列表内"才算命中。只能和 `client` 一起用，单独给返回 400；和域名条件之间仍然是"与"；动作仍然只能是直连或屏蔽。一条规则一个动作，不命中就继续往下匹配；不做"全部代理"。AtomDNS 原来的两种客户端分流模式用规则写：
+
+- "名单内客户端不走代理"（`listed_direct`）= "client ∈ 名单 → 直连"；
+- "仅名单内客户端走代理"（`only_listed_proxy`）= "client ∉ 名单 → 直连"（`client_invert: true`）。
+
+这条规则放在规则表最前面，这些客户端就完全不分流（连广告也不屏蔽）；放在"广告 → 屏蔽"下面，它们仍然屏蔽广告。没有客户端地址的查询（绑定账本的重算、进程内的查询）任何客户端条件都不命中，取反的也一样：没有客户端时谈不上"不在名单内"，而且这类规则只能直连或屏蔽，不影响 sing-box 的绑定（4.5.1）。`rules/test` 的 `client` 参数照样能测出取反的效果。
 
 带 `client` 条件的规则，动作只能是直连或屏蔽，不能是代理。**[定]** 原因：sing-box 只按域名绑定出站组，不区分客户端。比如"客户端 A 的 foo.com → 组 X"：A 一查就发 SET X，于是别的客户端拿到 foo.com 的 FakeIP 后也走 X。别的客户端从缓存拿到 FakeIP 时不发 CLEAR；不走缓存时，A 的 SET 和别人的 CLEAR 会来回覆盖。所以代理规则对所有客户端都一样，客户端条件只用来决定这个客户端能不能走代理（直连或屏蔽）。sing-box 不增加按客户端分流的功能。API 新建或修改这种规则时返回 400。
 
@@ -142,7 +149,7 @@ Rule {
 - `cuscn`、`cusnocn` 是公共的修正列表（nekolsd 的 sing-geosite），配置里带着 srs 文件，所以做成内置规则集（`atom_rules.yaml` 的 `builtin`，和 `geosite_cn` 一样按 mapper 打的 fast_mark 判断），不做成远程规则集：新装时还没有节点，经 7890 下载会被空的默认组拒绝。它们在原判断里排在 geosite 前面，现在是默认规则表的第 3、4 条；原判断里的 13、15 分支删除。原来 `cusnocn` 发 CLEAR 走 Final，现在发 SET `final`，出口一样。
 - 不写迁移：atom 还没发布过。
 - 内置规则集可以重新下载：`POST rulesets/{id}/refresh` 对 `adguard`、`geosite_cn`、`geosite_no_cn`、`cuscn`、`cusnocn` 有效（`GET rulesets` 里 `refreshable: true`），下载完照常清缓存、重算账本。`geoip_cn` 等原判断用的 IP 名单不是规则集，暂时只随程序更新。
-- 和 `client_routing` 的交互（待定）：规则表排在"指定客户端直连"前面，所以"名单内客户端不走代理"的客户端查代理修正里的域名，也会被判成代理。用户自己写的代理规则本来就是这样。`client_routing` 的去留还在讨论，这一步没有改它。
+- 和客户端规则的交互（已知）：客户端规则如果排在代理修正（或其他代理规则）后面，那些客户端查代理修正里的域名仍然会被判成代理。用法是把客户端规则放在最前面（4.2）。
 
 ### 4.5 规则变化后的生效
 
@@ -332,7 +339,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 - `GET/PUT dns`：`core_mode`、`block_qtypes`（SOA/PTR/HTTPS）、`block_aaaa`、`prefer_v4`、`ddns_foreign`（3.2）、`full_cache`、`lazy_cache`（只开放开关，缓存容量用 YAML 的默认值）、`ecs`（国外查询带的 ECS 地址，空串恢复默认）、`learning`（`enabled`、`remember_direct`、`remember_proxy`、`no_v4`、`no_v6`；关掉的学习名单随即清空）。改 `core_mode` 会启动一次 requery。
 - `GET upstreams`、`PUT upstreams/{tag}`：国内（`domestic`）、国外（`foreign`）、国外带 ECS（`foreignecs`）三组上游，条目是 AtomDNS 原有的上游条目（`use_proxy` 就是 7.1 说的按上游关闭代理）；FakeIP 组（`nocnfake`）不出现，也改不了。至少保留一个启用的条目；空列表恢复配置的默认列表。
 - 这两个资源不带 `version`，后写的覆盖先写的。
-- 其余开关不开放：`block_empty` 用默认值；`client_routing` 待定（4.4 末尾）。
+- 其余开关不开放：`block_empty` 用默认值；`client_routing` 删除，改用规则表的客户端条件（4.2）。
 
 ### 7.3 跨组件的一致性
 
@@ -445,7 +452,7 @@ atom/
 4. **联调**（已完成，2026-11-09；实现和定下的事见 4.6、9.4，规则见 [deploy-nft.md](deploy-nft.md)）：在 mosdns-rust 上用临时 systemd 单元跑 atomdns 和补丁版 sing-box，客户端用 netns 模拟，单网卡旁路由和双网卡网关两种形态都实测。验证通过的：DNS（代理规则 → FakeIP 且 sing-box 收到 SET，AAAA 空应答也带 SET；直连 → 真实 IP；屏蔽 → 空应答；没命中的国外域名 → FakeIP + CLEAR；国内域名 → 真实 IP；EDNS 选项用抓包核对）；TCP 经 redirect、UDP 经 TProxy（NTP、DNS）进 sing-box，从绑定的组或 Final 出去，UDP 回包源地址是 FakeIP；IP 规则（TCP、UDP、屏蔽，启用/停用时 nft 集合跟着变）；7890 按规则分流；拖动排序和改组立即生效，删掉代理规则后下一次查询重新发 CLEAR（缓存已清）；sing-box 重启后不重新查 DNS 绑定仍在；atomdns 重启后规则、节点、组、Final 不变，启动检查不重载 sing-box，nft 表重新加载并填好；`sing-box check` 不通过返回 400 什么都不动；mixed 端口被占时重载失败返回 502 并回滚，sing-box 进程不退出（PID 不变），期间 7890 请求 40/40 成功；网关形态下其他流量经 NAT 转发、不进 sing-box。联调中修的：UDP 53 写回（9.4）。codex 复审三轮：第 1、2 轮的两条 MAJOR（应用失败回滚、保存失败补偿后 nft 没跟上运行中的配置）已修；第 3 轮的一条（补偿时重载也失败）按已知限制处理，见 9.4 和 deploy-nft.md 第 8 节。没做：真实主路由下的单网卡形态、真实节点。
 5. **绑定账本和缓存失效**（已完成，2026-11-09；实现见 4.5.1）：绑定账本（SET 和 CLEAR 都记，LRU 16384 条，规则或规则集改动、确认删组后同步重算，有变化的直接发给 sing-box 的 `dns-in`，改 FakeIP 网段时清空）；直连应答 TTL 上限 `direct_ttl_max`（默认 300 秒）和 FakeIP 应答 TTL 上限 `fakeip_ttl_max`（默认 1 秒）。验证（mosdns-rust，第 4 步的临时环境，atomdns 换成第 5 步的调试版，通过运行时的 systemd drop-in 指向 `/root/atom-step5/bin`，没有永久替换）：客户端拿着 FakeIP 不重新查询，规则从组 X 改成组 Y 后连接从 Y 出去，抓包看到账本发出 SET Y；删掉代理规则后 sing-box 收到 CLEAR，同一个 FakeIP 走 Final；代理改直连、改屏蔽分别发 SET direct、SET block，同一个 FakeIP 立即直连、被拒；原判断走 Final 的国外域名加了代理规则后，同一个 FakeIP 改走新组；确认删组后发 SET final；sing-box 重启后绑定仍在；改 FakeIP 网段后账本清空；FakeIP 应答 TTL 是 1，改 `fakeip_ttl_max` 后跟着变；直连应答（上游 TTL 86400）封顶到 300，改 `direct_ttl_max` 后跟着变，UDP、TCP 和缓存命中都一样；改 TTL 设置不重载 sing-box。全量 `cargo test --workspace` 1637 个通过、0 失败（最终提交）。codex 复审三轮：第 1 轮两条 MAJOR（AAAA 应答被当作确认，已改成只记 A；重算不模拟重写、DDNS 等固定项，记为限制），第 2 轮一条 MAJOR（sing-box 绑定保存失败仍照常应答，sing-box 补丁改成报错、账本只认 NOERROR），第 3 轮通过。sing-box 补丁多了一个提交（`e7b78640`），端到端用的是它的 Linux 构建。
 6. **简易 WebUI + OpenAPI 规范定稿**，拆成两步 **[定]**：
-   - **6a 后端定稿**（已完成，2026-11-09；见 4.4、7.1、7.2、第 8 节）：OpenAPI 规范 `atomdns/docs/api/openapi.yaml`（redocly lint 无错误无警告，`ROUTES` 一致性测试）；新接口 `dns`、`upstreams`、`ddns`、`rewrite`，内置规则集可以刷新；删除专属分流组的代码、AtomDNS 原有的管理接口（27 条在测试机上逐条确认是 404）和背后只给它们用的写入路径；黑名单、白名单、灰名单删除，`cuscn`、`cusnocn` 成为内置规则集并进入默认规则表。全量 `cargo test --workspace` 1531 个通过、0 失败（删掉了只测已删接口的测试，借旧接口做探针的测试改走进程内入口）。测试机（mosdns-rust，运行时 drop-in 指向 `/root/atom-step6/bin/atomdns` 和新配置根 `/root/atom-step6/root`，sing-box 仍是第 5 步的构建，没有永久替换）上新装状态验证：默认规则表 4 条；代理修正的域名拿到 FakeIP、直连修正的拿到真实 IP；`dns`、`upstreams`、`ddns`、`rewrite` 改了即生效、重写的域名直接应答；`cusnocn`、`geosite_cn` 经 7890 刷新成功。没做：`client_routing`（待定）；`HOST_API_LEVEL` 升级放到 6b，和新 WebUI 一起。
+   - **6a 后端定稿**（已完成，2026-11-09；见 4.4、7.1、7.2、第 8 节）：OpenAPI 规范 `atomdns/docs/api/openapi.yaml`（redocly lint 无错误无警告，`ROUTES` 一致性测试）；新接口 `dns`、`upstreams`、`ddns`、`rewrite`，内置规则集可以刷新；删除专属分流组的代码、AtomDNS 原有的管理接口（27 条在测试机上逐条确认是 404）和背后只给它们用的写入路径；黑名单、白名单、灰名单删除，`cuscn`、`cusnocn` 成为内置规则集并进入默认规则表。全量 `cargo test --workspace` 1531 个通过、0 失败（删掉了只测已删接口的测试，借旧接口做探针的测试改走进程内入口）。测试机（mosdns-rust，运行时 drop-in 指向 `/root/atom-step6/bin/atomdns` 和新配置根 `/root/atom-step6/root`，sing-box 仍是第 5 步的构建，没有永久替换）上新装状态验证：默认规则表 4 条；代理修正的域名拿到 FakeIP、直连修正的拿到真实 IP；`dns`、`upstreams`、`ddns`、`rewrite` 改了即生效、重写的域名直接应答；`cusnocn`、`geosite_cn` 经 7890 刷新成功。客户端分流（`client_routing`）删除，规则的客户端条件加了取反（`client_invert`，4.2）。没做：`HOST_API_LEVEL` 升级放到 6b，和新 WebUI 一起。
    - **6b 简易 WebUI**：新写的 Vue 3 + Vite 工程（`atomdns/webui/`），按规范实现，删除 `webui-log/`，测试机上跑完整流程。
 7. **安装器**。
 
