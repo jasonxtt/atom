@@ -381,7 +381,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
   - 写操作占用管理租约，`PUT settings` 例外：它自己拿租约，只覆盖 sing-box 的部分，因为改 mixed 端口要重新加载 AtomDNS 配置，而重新加载要等所有租约结束。
 - `dns`、`upstreams`、`ddns`、`rewrite`（`rust/native-host/src/atom_dns_api.rs`，第 6 步）：
   - `GET dns` / `PUT dns` 见 7.2；返回改后的全部字段。`GET upstreams` 返回 `{groups: [{tag, customized, upstreams}]}`，`PUT upstreams/{tag} {upstreams}` 返回同样的结构。这两个写操作不占管理租约（理由同 `PUT settings`：发布新一代配置要等所有租约结束），没有 `version`；发布期间别的请求可能拿到 503，重试即可。已知限制（第 6 步联调发现，AtomDNS 原有行为）：新装时 AdGuard 规则文件还没下载下来，加了节点以后后台下载才成功；下载如果正好落在新一代配置编译和提交之间，提交时发现输入文件变了，返回 409（`managed input changed externally`），什么都没改，重试一次即可。
-  - `GET ddns` / `GET rewrite` 返回 `{entries}`；`PUT` 同样的 `{entries}` 整份替换：先校验，再写文件，最后生效（重写原来是先改内存再写文件，写失败时内存和文件不一致，改掉了），然后清空所有缓存。DDNS 条目和名单文件同格式；重写一行是"域名规则 + IP 或目标域名"。codex 第 1 轮复审后补的：`ddns` 要等名单和用到它的 mapper 都重建完才返回（重建正在进行时只会被标记为再建一次，原来会提前返回）；重写文件记进配置编译的输入指纹，`PUT dns` 等发布新一代配置时，如果重写文件在编译之后被改过，提交时返回 409，不会把旧的重写规则装回去。
+  - `GET ddns` / `GET rewrite` 返回 `{entries}`；`PUT` 同样的 `{entries}` 整份替换：先校验，再写文件，最后生效（重写原来是先改内存再写文件，写失败时内存和文件不一致，改掉了），然后清空所有缓存。DDNS 条目和名单文件同格式；重写一行是"域名规则 + IP 或目标域名"。codex 第 1 轮复审后补的：`ddns` 要等名单和用到它的 mapper 都重建完才返回（重建正在进行时只会被标记为再建一次，原来会提前返回）；重写文件记进配置编译的输入指纹，`PUT dns` 等发布新一代配置时，如果重写文件在编译之后被改过，提交时返回 409，不会把旧的重写规则装回去。重写插件配置了多个文件时 `PUT rewrite` 返回 409，不整份替换（只写第一个文件的话，其余文件的规则下次加载会回来；codex 第 2 轮）。atom 自带的配置只有一个文件。
   - 重算账本不模拟这两项（4.5.1 已知限制），改它们不触发重算。
 - 内置规则集：`GET rulesets` 里是 `{id, name, type: builtin, refreshable}`；`POST rulesets/{id}/refresh` 返回 `{id, sources, updated}`，一个来源都没下载成功时 502、列表不变。同一个来源正在下载（启动时的下载、另一次刷新）时先等它结束，再下载一次（codex 第 1 轮）。
 - 错误格式沿用 AtomDNS 现有的格式。**[定]**
