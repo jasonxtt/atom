@@ -110,6 +110,7 @@ ip route replace local 0.0.0.0/0 dev lo table 233
 
 - 配置：`atom_rules.yaml` 的 `singbox.nft_table: atom`（产品配置里写死）；`singbox.nft` 是命令，默认 `[nft]`。没写 `nft_table` 就不碰 nft（测试配置）。
 - 时机：每次 sing-box 应用成功之后（FakeIP 网段和 IP 规则只会随应用变化，所以只改域名规则、改名这类不会动 nft），`POST apply` 之后，以及每次启动和重新加载配置时（不管 sing-box 要不要重新应用）。
+- 内容：取自正在运行的 sing-box 配置文件 `config.json`（应用失败回滚后就是旧配置），读不到时才用 atom 的状态。
 - 做法：写一个临时脚本，`nft -f` 一次执行，两个集合都先 `flush` 再 `add element`，是一个事务，中间状态看不到。只写 IPv4 的 IP 规则网段，去重。
 - 失败（表没装、nft 不在 PATH 里）不回滚规则的改动：sing-box 已经按新规则在跑，只记日志，`GET status` 的 `nft.sync` 是 `{at, ok: false, error, sets}`。成功时 `ok: true`，`sets` 是写进去的内容。`nft.table` 给出表名。
 - 更新在应用锁里做，两次修改的 nft 更新不会乱序。
