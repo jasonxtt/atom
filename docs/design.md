@@ -237,7 +237,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 - **DDNS**：写成"直连 + 上游组 + 不缓存"的规则，放在规则表最前面，和原来"排在规则表之前的固定项"等价。默认规则表不带 DDNS 规则。原来的"国外失败回退国内"不再提供。
 - **账本**：直连不管走哪个组，绑定都是 SET direct（4.5.1），不受影响。
 - **和配置发布的并发**（codex 6b-2a 第 1 轮）：编译配置时读到的 `atom_rules.json`、`atom_rulesets.json`、`atom_proxy.json` 记进编译输入的指纹。发布新一代配置（`PUT dns`、上游组的改动）编译期间如果有规则或节点的写入落盘，提交时指纹对不上，这次发布返回 409，不会装上编译时读到的旧表；所以删组时的引用检查和随后的规则写入之间不会留下引用不存在的组的规则。
-- **ECS 和刷新**（codex 6b-2a 第 2 轮）：`atom_rules` 的 `route_ecs`（自带配置 `{foreignecs: $client_ecs}`）让选了这个组的路由先加 ECS 再查，这个组的规则缓存按 ECS 区分，和原来的 `sequence_google_node` 一样。刷新流程 `sequence_requery` 用另生成的 `atom_direct_requery`，不经过规则缓存，刷新总是问上游组（requery 的 flush 名单写不到生成的缓存）。删组时连同它的缓存调优（`settings.caches.cache_atom_<组>`）一起删掉。
+- **ECS 和刷新**（codex 6b-2a 第 2 轮）：`atom_rules` 的 `route_ecs`（自带配置 `{foreignecs: $client_ecs}`）让选了这个组的路由先加 ECS 再查，这个组的规则缓存按 ECS 区分，和原来的 `sequence_google_node` 一样。刷新：requery 的 flush 名单写不到生成的缓存，所以 requery 只要清缓存（`flush_rules` 不为空），就连同所有 `cache_atom_<组>` 一起清空，然后照常经 `atom_direct` 重新查询、重新填缓存（codex 第 3 轮；第 2 轮曾让刷新绕过规则缓存，结果刷新到的新应答不进缓存，客户端仍拿旧的）。ECS 是序列里单独的一步：`ecs` 只作用于它所在序列的后续步骤，放进内联块里就作用不到缓存和上游（codex 第 3 轮）。删组时连同它的缓存调优（`settings.caches.cache_atom_<组>`）一起删掉。
 - **退役开关**：`settings.json` 里存着的 `ddns_foreign` 被忽略（下次写设置时去掉），不会让配置加载失败。
 
 ## 5. 节点与节点组
