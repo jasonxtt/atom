@@ -112,10 +112,11 @@ Rule {
 | `ruleset` | 引用一个规则集：内置 geosite 分类、远程列表 URL，或本地列表 |
 | `client` | 来源客户端 IP 或网段，可以和域名条件组合 |
 | `ip_cidr` | 目标 IP 网段，用于 Telegram 这类直接按 IP 连接的流量，见 4.6 |
+| `ip_ruleset` | 取规则集的 IP 部分（第 6b 步，4.6、4.9）：`ruleset` 取域名部分，两个都填就是整个规则集 |
 
 一条规则内部是"或"还是"与"：**[定]** 同一类条件之间是"或"，不同类之间是"与"。比如"suffix google.com 或 youtube.com，并且客户端是 192.168.1.50"。
 
-"类"的划分（第 2 步实现时定下）：`domain`、`suffix`、`keyword`、`regex`、`ruleset` 都是域名条件，算同一类；`client` 是第二类；`ip_cidr` 由 sing-box 匹配（4.6）。所以"domain a.com，ruleset 广告"表示 a.com 或广告域名。只有 `client` 条件的规则匹配这个客户端的所有域名。规则至少要有一个条件。
+"类"的划分（第 2 步实现时定下）：`domain`、`suffix`、`keyword`、`regex`、`ruleset` 都是域名条件，算同一类；`client` 是第二类；IP 部分（`ip_cidr`、`ip_ruleset`）由 sing-box 匹配（4.6）。所以"domain a.com，ruleset 广告"表示 a.com 或广告域名。只有 `client` 条件的规则匹配这个客户端的所有域名。规则至少要有一个条件。
 
 客户端条件取反（第 6 步，用户定的）**[定]**：`match.client_invert` 为 true 时，"客户端不在 `client` 列表内"才算命中。只能和 `client` 一起用，单独给返回 400；和域名条件之间仍然是"与"；动作仍然只能是直连或屏蔽。一条规则一个动作，不命中就继续往下匹配；不做"全部代理"。AtomDNS 原来的两种客户端分流模式用规则写：
 
@@ -150,7 +151,8 @@ Rule {
 - 黑名单、白名单、灰名单删除：插件、`unified_matcher1` 条目、名单文件、原判断里的分支和 `block_blocklist` 开关都删掉。这三份是原作者个人的名单，分享版不带；要屏蔽、代理、直连某些域名，直接写规则。原来黑名单返回 NXDOMAIN，规则表的屏蔽是空应答。
 - `cuscn`、`cusnocn` 是公共的修正列表（nekolsd 的 sing-geosite），配置里带着 srs 文件，所以做成内置规则集（`atom_rules.yaml` 的 `builtin`，和 `geosite_cn` 一样按 mapper 打的 fast_mark 判断），不做成远程规则集：新装时还没有节点，经 7890 下载会被空的默认组拒绝。它们在原判断里排在 geosite 前面，现在是默认规则表的第 3、4 条；原判断里的 13、15 分支删除。原来 `cusnocn` 发 CLEAR 走 Final，现在发 SET `final`，出口一样。
 - 不写迁移：atom 还没发布过。
-- 内置规则集可以重新下载：`POST rulesets/{id}/refresh` 对 `adguard`、`geosite_cn`、`geosite_no_cn`、`cuscn`、`cusnocn` 有效（`GET rulesets` 里 `refreshable: true`），下载完照常清缓存、重算账本。`geoip_cn` 等原判断用的 IP 名单不是规则集，暂时只随程序更新。
+- 内置规则集可以重新下载：`POST rulesets/{id}/refresh` 对 `adguard`、`geosite_cn`、`geosite_no_cn`、`cuscn`、`cusnocn` 有效（`GET rulesets` 里 `refreshable: true`），下载完照常清缓存、重算账本。
+- 第 6b 步 **[定]**：`geoip_cn` 也列在规则集里（`atom_rules` 的 `ip_builtin`），可以刷新、改地址，规则不能引用（`usable: false`）。`geosite_cn`、`geosite_no_cn`、`geoip_cn` 是原判断必需的，不能删；`adguard`、`cuscn`、`cusnocn` 可以删（`DELETE rulesets/{id}`，有规则引用时 409，带 `confirm=true` 先把它从这些规则里去掉，只剩客户端条件或没有条件的规则一起删；删掉的记在 `webinfo/atom_builtin.json`）。只有一个下载来源的内置规则集可以改地址（`PUT rulesets/{id} {url}`，改完立即下载）；`adguard` 有多个来源，不能整体改地址（409）。内置规则集打开了 AtomDNS 原有的每日自动更新（`srs/*.json`、`adguard/config.json` 的 `auto_update`）；自动更新仍然不清缓存、不重算账本（4.5.1 的已知限制）。
 - 和客户端规则的交互（已知）：客户端规则如果排在代理修正（或其他代理规则）后面，那些客户端查代理修正里的域名仍然会被判成代理。用法是把客户端规则放在最前面（4.2）。
 
 ### 4.5 规则变化后的生效
@@ -197,7 +199,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 
 第 3 步定下的 **[定]**：
 
-- 带 `ip_cidr` 的规则只能单独用，不能再带域名或 `client` 条件（否则 400）。动作可以是代理、直连、屏蔽。
+- 带 `ip_cidr` 的规则只能单独用，不能再带域名或 `client` 条件（否则 400）。动作可以是代理、直连、屏蔽。第 6b 步改为 **[定]**：IP 部分（`ip_cidr`、`ip_ruleset`）可以和域名条件写在同一条规则里，域名在 DNS 里匹配、网段在 sing-box 里匹配，用同一个动作；带 `client` 的规则仍然不能有 IP 部分（客户端名单在 AtomDNS，sing-box 判断不了）。`ip_ruleset` 的网段来自规则集下载内容里的 IP 条目（`<id>-<revision>.ip.txt`，规则集的 `ip_count`），按规则表顺序和 `ip_cidr` 合在一起编成 sing-box 路由规则；还没有网段的规则集不产生 sing-box 规则。规则的改动仍是先应用 sing-box 再保存；规则集下载改变了网段时，先保存规则集，再重新应用一次 sing-box（trigger `rulesets`），应用失败时规则集照样更新，sing-box 继续用旧网段（`in_sync` 为 false），下次应用时补上。
 - AtomDNS 的 DNS 匹配跳过它们（`rules/test` 也不会命中）。启用的 IP 规则按规则表里的顺序编译成 sing-box 路由规则，排在 mixed 入站的 `resolve` 之后：代理 → `route` 到组，直连 → `route` 到 `direct`，屏蔽 → `reject`。网段写回规范形式（主机位清零）。
 - 改动规则时，如果启用的 IP 规则（网段、动作、顺序）有变化，就走一遍 sing-box 应用事务（第 6 节），应用失败时规则的改动也不保存。只改域名规则不碰 sing-box。
 - nft 部分（第 4 步实现，见 9.4）：nft 规则把 FakeIP 网段和 IP 规则网段导进 sing-box，网段放在 nft 集合里，由 atomdns 在每次应用成功后和启动时更新；`GET status` 的 `nft` 给出网段（分 inet4/inet6）、表名和最近一次更新的结果。只导 IPv4：IPv6 的 IP 规则只对 7890 入站有效。单网卡旁路由时，IP 规则的网段也要在主路由上加静态路由，否则只对 7890 有效。
@@ -239,6 +241,12 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 - **和配置发布的并发**（codex 6b-2a 第 1 轮）：编译配置时读到的 `atom_rules.json`、`atom_rulesets.json`、`atom_proxy.json` 记进编译输入的指纹。发布新一代配置（`PUT dns`、上游组的改动）编译期间如果有规则或节点的写入落盘，提交时指纹对不上，这次发布返回 409，不会装上编译时读到的旧表；所以删组时的引用检查和随后的规则写入之间不会留下引用不存在的组的规则。
 - **ECS 和刷新**（codex 6b-2a 第 2 轮）：`atom_rules` 的 `route_ecs`（自带配置 `{foreignecs: $client_ecs}`）让选了这个组的路由先加 ECS 再查，这个组的规则缓存按 ECS 区分，和原来的 `sequence_google_node` 一样。刷新：requery 的 flush 名单写不到生成的缓存，所以 requery 只要清缓存（`flush_rules` 不为空），就连同所有 `cache_atom_<组>` 一起清空，然后照常经 `atom_direct` 重新查询、重新填缓存（codex 第 3 轮；第 2 轮曾让刷新绕过规则缓存，结果刷新到的新应答不进缓存，客户端仍拿旧的）。ECS 是序列里单独的一步：`ecs` 只作用于它所在序列的后续步骤，放进内联块里就作用不到缓存和上游（codex 第 3 轮）。删组时连同它的缓存调优（`settings.caches.cache_atom_<组>`）一起删掉。
 - **退役开关**：`settings.json` 里存着的 `ddns_foreign` 被忽略（下次写设置时去掉），不会让配置加载失败。
+
+### 4.9 规则源目录和规则集的自动更新（第 6b 步）**[定]**
+
+- **目录**：MetaCubeX 的 `meta-rules-dat`（`sing` 分支，`geo/geosite/<名>.srs` 是域名，`geo/geoip/<名>.srs` 是网段）和 blackmatrix7 官方的 `ios_rule_script`（`rule/Clash/<名>/<名>.list`，域名和网段在一个文件里）。条目 ID 是 `meta:<名>`、`bm7:<名>`。目录索引随配置带一份（`rule/atom_catalog.json`，2026-11-10 生成：geosite 2022、geoip 260、bm7 668），`POST catalog/sync` 和每日更新经 `main_proxy` 用 GitHub 的 trees 接口重新读，写到 `webinfo/atom_catalog.json`，比带的那份新就用它。`GET catalog?q=` 搜索。
+- **托管规则集**：规则的 `ruleset`、`ip_ruleset` 引用目录条目时，如果还没有这个规则集，先建一个（ID 就是条目 ID，来源 `catalog`）并下载，下载失败返回 502，规则不保存；MetaCubeX 的两个文件合在一起。最后一条引用它的规则改掉或删掉后，它跟着删除。托管规则集不能手动新建或修改，只能刷新。下载里用不了的条目（IP-ASN、PROCESS-NAME 等）按种类计数（规则集的 `skipped`），界面提示数量。
+- **每日更新**：配置开始服务 5 分钟后，然后每小时检查一次：远程规则集和托管规则集里一天没更新的重新下载，目录索引一天没同步的重新同步。每次下载持管理租约（和 API 写操作一样，不会撞上配置发布）；成功后照常清缓存、重算账本，网段变了按 4.6 重新应用 sing-box。新一代配置接管时旧的更新任务停止。
 
 ## 5. 节点与节点组
 
