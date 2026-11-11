@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# atom: installs the installer. Paste this on the machine that is to become the gateway:
+#   curl -fsSL <address of this script> | sudo bash
+# It downloads the matching atom package (GitHub first, then the accelerators below when GitHub is
+# slow or not reachable), unpacks it under /opt/atom and starts the installation wizard, whose address
+# it prints. On a machine where atom is already installed it upgrades instead.
+#
+# Environment (all optional):
+#   ATOM_MIRRORS  prefixes put before the GitHub address, tried in turn after the direct download
+#   ATOM_REPO     owner/name of the GitHub repository that holds the release
+#   ATOM_PKG      a local package file or a URL to use instead of downloading the release
+set -euo pipefail
+
+ATOM_VERSION="@VERSION@"
+ATOM_SHA256="@SHA256@"
+ATOM_REPO="${ATOM_REPO:-@REPO@}"
+ATOM_MIRRORS="${ATOM_MIRRORS-https://gh-proxy.com/ https://ghfast.top/ https://ghproxy.net/}"
+
+ROOT=/opt/atom
+ASSET="atom-${ATOM_VERSION}-linux-amd64.tar.gz"
+RELEASE_URL="https://github.com/${ATOM_REPO}/releases/download/v${ATOM_VERSION}/${ASSET}"
+
+say() { printf '%s\n' "$*"; }
+die() { printf 'atom: %s\n' "$*" >&2; exit 1; }
+
+[ "$(id -u)" = 0 ] || die "需要 root。用法：curl -fsSL <脚本地址> | sudo bash"
+[ "$(uname -m)" = x86_64 ] || die "只支持 x86_64"
+[ -d /run/systemd/system ] || die "需要 systemd"
+[ -r /etc/os-release ] || die "找不到 /etc/os-release"
+# shellcheck disable=SC1091
+. /etc/os-release
+major="${VERSION_ID%%.*}"
+case "${ID:-}" in
+  debian) [ "${major:-0}" -ge 12 ] || die "需要 Debian 12 或更新" ;;
+  ubuntu) [ "${major:-0}" -ge 22 ] || die "需要 Ubuntu 22.04 或更新" ;;
+  *) die "只支持 Debian 和 Ubuntu（当前：${PRETTY_NAME:-未知}）" ;;
+esac
+for c in curl tar sha256sum; do command -v "$c" >/dev/null || die "缺少命令 $c"; done
+if ! command -v ss >/dev/null; then
+  say "安装 iproute2…"
+  apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 >/dev/null || die "安装 iproute2 失败"
+fi
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+PKGFILE="$TMP/$ASSET"
+
+fetch() { # url dest: gives up when the connection takes 6s or the speed stays under 50 KB/s for 10s
+  curl -fL --connect-timeout 6 --speed-limit 51200 --speed-time 10 --max-time 1800 --retry 0 --progress-bar -o "$2" "$1"
+}
+
+verify() {
+  [ -z "$ATOM_SHA256" ] && return 0
+  [ "$(sha256sum "$1" | cut -d' ' -f1)" = "$ATOM_SHA256" ]
+}
+
+download() {
+  local prefix src
+  for prefix in "" $ATOM_MIRRORS; do
+    src="${prefix}${RELEASE_URL}"
+    say "下载 atom ${ATOM_VERSION}（${prefix:-GitHub 直连}）"
+    if fetch "$src" "$PKGFILE" && verify "$PKGFILE"; then return 0; fi
+    say "  这个来源不行，换下一个"
+    rm -f "$PKGFILE"
+  done
+  return 1
+}
+
+if [ -n "${ATOM_PKG:-}" ]; then
+  case "$ATOM_PKG" in
+    http://*|https://*) say "下载 $ATOM_PKG"; fetch "$ATOM_PKG" "$PKGFILE" || die "下载失败" ;;
+    *) [ -f "$ATOM_PKG" ] || die "找不到 $ATOM_PKG"; cp "$ATOM_PKG" "$PKGFILE" ;;
+  esac
+else
+  download || die "所有来源都下载失败。可以设置 ATOM_MIRRORS（加速前缀）或 ATOM_PKG（本地包或地址）后重试"
+fi
+
+PKG="$ROOT/pkg"
+rm -rf "$PKG"
+mkdir -p "$PKG"
+tar -xzf "$PKGFILE" -C "$PKG" --strip-components=1 || die "解包失败"
+[ -x "$PKG/bin/atom-installer" ] || die "包里没有 atom-installer"
+
+if grep -qs '"complete": true' "$ROOT/etc/install.json"; then
+  say "已安装 atom，升级…"
+  exec "$PKG/bin/atom-installer" upgrade --pkg "$PKG"
+fi
+
+systemctl stop atom-installer.service 2>/dev/null || true
+systemctl reset-failed atom-installer.service 2>/dev/null || true
+rm -f "$ROOT/run/installer.json"
+systemd-run --quiet --unit=atom-installer --collect "$PKG/bin/atom-installer" serve --pkg "$PKG" \
+  || die "启动安装器失败"
+for _ in $(seq 1 40); do
+  [ -s "$ROOT/run/installer.json" ] && break
+  sleep 0.5
+done
+[ -s "$ROOT/run/installer.json" ] || die "安装器没有起来，查看：journalctl -u atom-installer"
+
+say ""
+say "atom 安装器已就绪，请在浏览器打开："
+"$PKG/bin/atom-installer" urls | sed 's/^/  /'
+say ""

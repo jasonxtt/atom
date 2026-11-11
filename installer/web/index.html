@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>atom 安装</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f4f5f7; --card: #ffffff; --ink: #1c2230; --muted: #667085; --line: #dde1e8;
+  --accent: #2563eb; --accent-ink: #ffffff; --ok: #15803d; --warn: #b45309; --err: #b91c1c;
+  --warn-bg: #fff7e6; --err-bg: #fdecec; --code-bg: #0f172a; --code-ink: #d6deeb; --field: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0e1116; --card: #171b22; --ink: #e6e9ef; --muted: #98a2b3; --line: #2a303b;
+    --accent: #5b8def; --accent-ink: #0b1020; --ok: #4ade80; --warn: #fbbf24; --err: #f87171;
+    --warn-bg: #2b2412; --err-bg: #2e1717; --code-bg: #0a0d12; --code-ink: #c9d3e6; --field: #11151b;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+main { max-width: 760px; margin: 0 auto; padding: 28px 16px 48px; }
+header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 18px; }
+h1 { font-size: 20px; margin: 0; letter-spacing: .2px; }
+.ver { color: var(--muted); font-size: 13px; }
+.steps { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+.steps span { padding: 4px 12px; border-radius: 999px; background: var(--card); border: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+.steps span.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.steps span.done { color: var(--ok); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+.card + .card { margin-top: 14px; }
+h2 { font-size: 16px; margin: 0 0 14px; }
+.row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px solid var(--line); }
+.row:first-of-type { border-top: 0; }
+.row .grow { flex: 1; min-width: 0; }
+.row .sub { color: var(--muted); font-size: 13px; word-break: break-all; }
+.mark { width: 20px; text-align: center; font-weight: 700; flex: none; }
+.ok { color: var(--ok); } .bad { color: var(--err); } .wait { color: var(--warn); }
+label.field { display: block; margin: 0 0 14px; }
+label.field > span { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+input[type=text], input[type=number], select, textarea {
+  width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--field); color: var(--ink); font: inherit;
+}
+textarea { min-height: 96px; resize: vertical; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: transparent; }
+.err { color: var(--err); font-size: 13px; margin-top: 4px; }
+.choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.choice { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; cursor: pointer; display: block; }
+.choice input { margin-right: 8px; }
+.choice.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.checks label { display: flex; gap: 8px; align-items: center; padding: 4px 0; }
+.notice { background: var(--warn-bg); border: 1px solid var(--warn); border-radius: 10px; padding: 12px 14px; margin: 4px 0 14px; }
+.notice label { display: flex; gap: 8px; align-items: flex-start; margin-top: 8px; font-weight: 600; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 560px) { .grid2 { grid-template-columns: 1fr; } }
+.nav { display: flex; justify-content: space-between; margin-top: 18px; gap: 10px; }
+button { font: inherit; padding: 8px 18px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+button.small { padding: 4px 12px; font-size: 13px; }
+button:disabled { opacity: .5; cursor: default; }
+table.sum { width: 100%; border-collapse: collapse; }
+table.sum td { padding: 7px 0; border-top: 1px solid var(--line); vertical-align: top; }
+table.sum tr:first-child td { border-top: 0; }
+table.sum td:first-child { color: var(--muted); width: 120px; }
+.prog .row { padding: 7px 0; }
+pre.log { background: var(--code-bg); color: var(--code-ink); border-radius: 8px; padding: 12px; margin: 14px 0 0; max-height: 280px; overflow: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-all; }
+.banner-err { background: var(--err-bg); border: 1px solid var(--err); color: var(--err); border-radius: 10px; padding: 10px 14px; margin-top: 14px; word-break: break-all; }
+.warns { background: var(--warn-bg); border: 1px solid var(--warn); border-radius: 10px; padding: 10px 14px; margin-top: 14px; }
+.warns div + div { margin-top: 4px; }
+code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--bg); padding: 1px 6px; border-radius: 5px; }
+.spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: sp .8s linear infinite; vertical-align: -2px; }
+@keyframes sp { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script>
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(method, path, body) {
+  const r = await fetch(path, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined });
+  let data = null;
+  try { data = await r.json(); } catch (e) {}
+  if (!r.ok) { const err = new Error((data && data.error) || ('HTTP ' + r.status)); err.data = data; throw err; }
+  return data;
+}
+
+const STEPS = ['环境', '网络', 'DNS', 'sing-box', '安装'];
+const FIELD_STEP = { topology: 1, lan: 1, wan: 1, accept_gateway: 1, panel_port: 1, domestic: 2, foreign: 2, fakeip_range: 3, mixed_port: 3 };
+const S = { state: null, step: 0, cfg: null, errors: {}, freed: [], freeing: null, freeErr: '', job: null, jobNext: 0, log: [], phase: 'wizard', redirectTimer: null, paused: false };
+
+function initCfg(st) {
+  const ifs = st.ifaces, def = ifs.find(i => i.default) || ifs[0];
+  S.cfg = {
+    topology: ifs.length >= 2 ? '' : 'bypass',
+    lan: def ? [def.name] : [], wan: '', accept_gateway: false,
+    panel_port: st.defaults.panel_port,
+    domestic: st.defaults.domestic, foreign: st.defaults.foreign,
+    fakeip_range: st.defaults.fakeip_range, mixed_port: st.defaults.mixed_port, nodes: '',
+  };
+}
+
+async function loadState() {
+  S.state = await api('GET', '/api/state');
+  if (!S.cfg) initCfg(S.state);
+}
+
+function envProblems() { return S.state.system.problems; }
+function envReady() { return envProblems().length === 0 && S.state.port53.length === 0; }
+
+function mark(ok) { return ok ? '<span class="mark ok">✓</span>' : '<span class="mark bad">✗</span>'; }
+
+function viewEnv() {
+  const st = S.state, sys = st.system;
+  let h = '<div class="card"><h2>环境</h2>';
+  h += `<div class="row">${mark(!sys.problems.some(p => /Debian|Ubuntu/.test(p)))}<div class="grow">系统<div class="sub">${esc(sys.os || '未知')}　${esc(sys.arch)}</div></div></div>`;
+  sys.problems.forEach(p => { h += `<div class="row"><span class="mark bad">✗</span><div class="grow">${esc(p)}</div></div>`; });
+  S.freed.forEach(f => { h += `<div class="row"><span class="mark ok">✓</span><div class="grow">${esc(f)}<div class="sub">已处理完毕</div></div></div>`; });
+  if (st.port53.length === 0) {
+    h += `<div class="row">${mark(true)}<div class="grow">53 端口空闲</div></div>`;
+  }
+  st.port53.forEach((o, i) => {
+    const what = esc(o.proc || '未知进程') + (o.pid ? ` (PID ${o.pid})` : '');
+    let btn = '';
+    if (o.kind === 'resolved') btn = `<button class="small primary" data-act="free" data-i="${i}">停用系统 DNS 占用</button>`;
+    else if (o.kind === 'unit') btn = `<button class="small primary" data-act="free" data-i="${i}">停止并禁用 ${esc(o.unit)}</button>`;
+    else btn = '<span class="sub">需要手动停止</span>';
+    if (S.freeing === i) btn = '<span class="spin"></span> 处理中…';
+    h += `<div class="row"><span class="mark bad">✗</span><div class="grow">53 端口被 ${what} 占用<div class="sub">${esc((o.addrs || []).join('，'))}</div></div><div>${btn}</div></div>`;
+  });
+  if (S.freeErr) h += `<div class="banner-err">${esc(S.freeErr)}</div>`;
+  h += '</div>';
+  return h;
+}
+
+function viewNet() {
+  const c = S.cfg, ifs = S.state.ifaces, e = S.errors;
+  const err = f => e[f] ? `<div class="err">${esc(e[f])}</div>` : '';
+  const ifLabel = i => `${esc(i.name)}　${esc(i.addrs.join(', '))}${i.default ? '　默认路由' : ''}`;
+  let h = '<div class="card"><h2>网络</h2><div class="choices">';
+  h += `<label class="choice ${c.topology === 'bypass' ? 'sel' : ''}"><input type="radio" name="topology" value="bypass" data-bind="topology" ${c.topology === 'bypass' ? 'checked' : ''}>单网卡旁路由</label>`;
+  h += `<label class="choice ${c.topology === 'gateway' ? 'sel' : ''}"><input type="radio" name="topology" value="gateway" data-bind="topology" ${c.topology === 'gateway' ? 'checked' : ''}>双网卡网关</label>`;
+  h += '</div>' + err('topology');
+  if (c.topology === 'bypass') {
+    h += '<label class="field"><span>网卡</span><select data-bind="lan_one">';
+    ifs.forEach(i => { h += `<option value="${esc(i.name)}" ${c.lan[0] === i.name ? 'selected' : ''}>${ifLabel(i)}</option>`; });
+    h += '</select>' + err('lan') + '</label>';
+  } else if (c.topology === 'gateway') {
+    h += '<div class="field"><span style="display:block;font-size:13px;color:var(--muted);margin-bottom:4px">LAN 网卡</span><div class="checks">';
+    ifs.forEach(i => { h += `<label><input type="checkbox" data-bind="lan_multi" value="${esc(i.name)}" ${c.lan.includes(i.name) ? 'checked' : ''}>${ifLabel(i)}</label>`; });
+    h += '</div>' + err('lan') + '</div>';
+    h += '<label class="field"><span>WAN 网卡</span><select data-bind="wan"><option value="">选择…</option>';
+    ifs.forEach(i => { h += `<option value="${esc(i.name)}" ${c.wan === i.name ? 'selected' : ''}>${ifLabel(i)}</option>`; });
+    h += '</select>' + err('wan') + '</label>';
+    h += `<div class="notice"><b>LAN 网卡上的全部流量都会经过这台机器：</b>目标是 FakeIP 网段和 IP 规则网段的进入 sing-box，其余流量转发并 NAT 到 WAN 网卡。<label><input type="checkbox" data-bind="accept_gateway" ${c.accept_gateway ? 'checked' : ''}>我知道，继续</label>${err('accept_gateway')}</div>`;
+  }
+  h += `<label class="field" style="max-width:200px"><span>面板端口</span><input type="number" min="1" max="65535" data-bind="panel_port" value="${esc(c.panel_port)}">${err('panel_port')}</label>`;
+  return h + '</div>';
+}
+
+function viewDNS() {
+  const c = S.cfg, e = S.errors;
+  const err = f => e[f] ? `<div class="err">${esc(e[f])}</div>` : '';
+  return `<div class="card"><h2>DNS</h2><div class="grid2">
+    <label class="field"><span>国内上游</span><textarea data-bind="domestic" spellcheck="false" placeholder="每行一个：地址 [拨号IP]">${esc(c.domestic)}</textarea>${err('domestic')}</label>
+    <label class="field"><span>国外上游</span><textarea data-bind="foreign" spellcheck="false" placeholder="每行一个：地址 [拨号IP]">${esc(c.foreign)}</textarea>${err('foreign')}</label>
+  </div></div>`;
+}
+
+function viewSB() {
+  const c = S.cfg, e = S.errors;
+  const err = f => e[f] ? `<div class="err">${esc(e[f])}</div>` : '';
+  return `<div class="card"><h2>sing-box</h2><div class="grid2">
+    <label class="field"><span>FakeIP 网段</span><input type="text" data-bind="fakeip_range" value="${esc(c.fakeip_range)}" spellcheck="false">${err('fakeip_range')}</label>
+    <label class="field"><span>mixed 代理端口</span><input type="number" min="1" max="65535" data-bind="mixed_port" value="${esc(c.mixed_port)}">${err('mixed_port')}</label>
+  </div>
+  <label class="field"><span>节点（可选）</span><textarea data-bind="nodes" spellcheck="false" placeholder="分享链接（每行一个）、Clash YAML 或 sing-box JSON" style="min-height:120px">${esc(c.nodes)}</textarea></label></div>`;
+}
+
+function lines(s) { return s.split('\n').map(x => x.trim()).filter(x => x && !x.startsWith('#')).length; }
+
+function viewConfirm() {
+  const c = S.cfg;
+  const rows = [
+    ['拓扑', c.topology === 'gateway' ? `双网卡网关　LAN ${esc(c.lan.join(', '))}　WAN ${esc(c.wan)}` : `单网卡旁路由　${esc(c.lan[0] || '')}`],
+    ['面板端口', esc(c.panel_port)],
+    ['国内上游', `${lines(c.domestic)} 个`], ['国外上游', `${lines(c.foreign)} 个`],
+    ['FakeIP 网段', esc(c.fakeip_range)], ['mixed 端口', esc(c.mixed_port)],
+    ['节点', c.nodes.trim() ? '导入' : '稍后在面板里添加'],
+  ];
+  return `<div class="card"><h2>确认</h2><table class="sum">${rows.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td></tr>`).join('')}</table></div>`;
+}
+
+function viewProgress() {
+  const j = S.job;
+  let h = '<div class="card prog"><h2>安装</h2>';
+  (j ? j.steps : []).forEach(s => {
+    const m = s.status === 'ok' ? '<span class="mark ok">✓</span>' : s.status === 'fail' ? '<span class="mark bad">✗</span>' : s.status === 'running' ? '<span class="mark"><span class="spin"></span></span>' : '<span class="mark" style="color:var(--muted)">·</span>';
+    h += `<div class="row">${m}<div class="grow">${esc(s.name)}</div></div>`;
+  });
+  if (j && j.error) h += `<div class="banner-err">${esc(j.error)}</div>`;
+  if (j && j.warnings && j.warnings.length) h += `<div class="warns">${j.warnings.map(w => `<div>${esc(w)}</div>`).join('')}</div>`;
+  h += `<pre class="log" id="log">${esc(S.log.join('\n'))}</pre></div>`;
+  if (j && j.done && !j.ok) h += '<div class="nav"><button data-act="back">返回修改</button><button class="primary" data-act="retry">重试</button></div>';
+  return h;
+}
+
+function viewDone() {
+  const h0 = S.job.hints, ip = h0.lan_ip, port = S.job.panel_port;
+  const url = `http://${location.hostname}${port === 80 ? '' : ':' + port}/`;
+  let h = '<div class="card"><h2>安装完成</h2>';
+  if (h0.topology === 'gateway') {
+    h += `<div class="row"><div class="grow">LAN 客户端的网关和 DNS 都指向 <code>${esc(ip)}</code></div></div>`;
+  } else {
+    h += `<div class="row"><div class="grow">主路由添加静态路由：<code>${esc(h0.fakeip_range)}</code> → <code>${esc(ip)}</code></div></div>`;
+    h += `<div class="row"><div class="grow">DHCP 下发的 DNS 改成 <code>${esc(ip)}</code></div></div>`;
+  }
+  const w = S.job.warnings || [];
+  if (w.length) h += `<div class="warns">${w.map(x => `<div>${esc(x)}</div>`).join('')}</div>`;
+  h += `<div class="nav"><span class="sub" id="countdown"></span><span><button data-act="pause" id="pausebtn">暂停跳转</button> <button class="primary" data-act="open">进入面板</button></span></div></div>`;
+  S.panelURL = url;
+  return h;
+}
+
+function viewInstalled() {
+  const i = S.state.installed, url = `http://${location.hostname}${i.panel_port === 80 ? '' : ':' + i.panel_port}/`;
+  return `<div class="card"><h2>已安装</h2><div class="row"><div class="grow">版本 ${esc(i.version)}</div><a href="${esc(url)}"><button class="primary">进入面板</button></a></div></div>`;
+}
+
+function render() {
+  const st = S.state;
+  let h = `<header><h1>atom 安装</h1><span class="ver">${esc(st.version)}</span></header>`;
+  if (st.installed && S.phase === 'wizard') {
+    document.getElementById('app').innerHTML = h + viewInstalled();
+    return;
+  }
+  if (S.phase === 'wizard') {
+    h += '<div class="steps">' + STEPS.map((n, i) => `<span class="${i === S.step ? 'on' : i < S.step ? 'done' : ''}">${n}</span>`).join('') + '</div>';
+    h += [viewEnv, viewNet, viewDNS, viewSB, viewConfirm][S.step]();
+    const last = S.step === STEPS.length - 1;
+    h += `<div class="nav"><button data-act="prev" ${S.step === 0 ? 'disabled' : ''}>上一步</button>` +
+      (last ? '<button class="primary" data-act="install">开始安装</button>' : `<button class="primary" data-act="next" ${S.step === 0 && !envReady() ? 'disabled' : ''}>下一步</button>`) + '</div>';
+  } else if (S.phase === 'progress') {
+    h += viewProgress();
+  } else {
+    h += viewDone();
+  }
+  document.getElementById('app').innerHTML = h;
+  const log = document.getElementById('log');
+  if (log) log.scrollTop = log.scrollHeight;
+}
+
+async function validate(step) {
+  const r = await api('POST', '/api/validate', S.cfg);
+  S.errors = {};
+  r.errors.forEach(e => { if (step === undefined || FIELD_STEP[e.field] === step) S.errors[e.field] = e.msg; });
+  return r.errors;
+}
+
+async function next() {
+  if (S.step >= 1) {
+    const errs = await validate(S.step);
+    if (errs.some(e => FIELD_STEP[e.field] === S.step)) { render(); return; }
+  }
+  S.errors = {};
+  S.step++;
+  render();
+}
+
+async function install() {
+  const errs = await validate();
+  if (errs.length) {
+    S.step = Math.min(...errs.map(e => FIELD_STEP[e.field] ?? 4));
+    if (S.step > 3) S.step = 3;
+    render();
+    return;
+  }
+  try { await api('POST', '/api/install', S.cfg); } catch (e) {
+    if (e.data && e.data.errors) { e.data.errors.forEach(x => S.errors[x.field] = x.msg); S.step = 1; render(); return; }
+    alert(e.message); return;
+  }
+  startProgress();
+}
+
+function startProgress() {
+  S.phase = 'progress'; S.job = null; S.log = []; S.jobNext = 0;
+  render();
+  pollJob();
+}
+
+async function pollJob() {
+  try {
+    const j = await api('GET', '/api/job?since=' + S.jobNext);
+    if (!j.idle) {
+      S.job = Object.assign(S.job || {}, j);
+      S.job.steps = j.steps;
+      S.log = S.log.concat(j.log || []);
+      S.jobNext = j.next;
+      if (j.done && j.ok) { S.phase = 'done'; render(); watchPanel(); return; }
+      render();
+      if (j.done) return;
+    }
+  } catch (e) { /* the server may be busy; try again */ }
+  setTimeout(pollJob, 700);
+}
+
+// The panel answers on its own port once atomdns is up (it already is); count down, then go.
+function watchPanel() {
+  let left = 10;
+  const tick = () => {
+    const el = document.getElementById('countdown');
+    if (S.paused) { if (el) el.textContent = ''; return; }
+    if (el) el.textContent = left + ' 秒后进入面板';
+    if (left-- <= 0) { openPanel(); return; }
+    S.redirectTimer = setTimeout(tick, 1000);
+  };
+  tick();
+}
+
+async function openPanel() {
+  clearTimeout(S.redirectTimer);
+  try { await api('POST', '/api/finish'); } catch (e) {}
+  for (let i = 0; i < 20; i++) {
+    try { await fetch(S.panelURL, { mode: 'no-cors', cache: 'no-store' }); break; } catch (e) { await new Promise(r => setTimeout(r, 500)); }
+  }
+  location.href = S.panelURL;
+}
+
+async function free(i) {
+  const o = S.state.port53[i];
+  S.freeing = i; S.freeErr = ''; render();
+  try {
+    S.state = await api('POST', '/api/free', { kind: o.kind, unit: o.unit });
+    S.freed.push(o.kind === 'resolved' ? '已停用 systemd-resolved 的 DNS 监听' : '已停止并禁用 ' + o.unit);
+  } catch (e) { S.freeErr = e.message; }
+  S.freeing = null; render();
+}
+
+document.addEventListener('click', ev => {
+  const b = ev.target.closest('[data-act]');
+  if (!b) return;
+  const a = b.dataset.act;
+  if (a === 'next') next();
+  else if (a === 'prev') { S.errors = {}; S.step--; render(); }
+  else if (a === 'install') install();
+  else if (a === 'free') free(+b.dataset.i);
+  else if (a === 'back') { S.phase = 'wizard'; S.step = 4; render(); }
+  else if (a === 'retry') install();
+  else if (a === 'open') openPanel();
+  else if (a === 'pause') { S.paused = !S.paused; b.textContent = S.paused ? '继续跳转' : '暂停跳转'; if (!S.paused) watchPanel(); else clearTimeout(S.redirectTimer); const el = document.getElementById('countdown'); if (el && S.paused) el.textContent = ''; }
+});
+
+document.addEventListener('input', ev => bind(ev.target));
+document.addEventListener('change', ev => { bind(ev.target); const t = ev.target; if (t.dataset.bind === 'topology' || t.dataset.bind === 'lan_multi' || t.dataset.bind === 'accept_gateway') render(); });
+
+function bind(t) {
+  const f = t.dataset && t.dataset.bind;
+  if (!f) return;
+  const c = S.cfg;
+  if (f === 'lan_one') c.lan = [t.value];
+  else if (f === 'lan_multi') c.lan = [...document.querySelectorAll('[data-bind=lan_multi]:checked')].map(x => x.value);
+  else if (f === 'accept_gateway') c.accept_gateway = t.checked;
+  else if (f === 'topology') { c.topology = t.value; if (t.value === 'gateway' && c.lan.length > 1) c.lan = [c.lan[0]]; }
+  else if (f === 'panel_port' || f === 'mixed_port') c[f] = parseInt(t.value, 10) || 0;
+  else c[f] = t.value;
+}
+
+(async function () {
+  try {
+    await loadState();
+    const j = await api('GET', '/api/job?since=0');
+    if (!j.idle) { S.phase = 'progress'; S.job = j; S.log = j.log; S.jobNext = j.next; render(); if (j.done && j.ok) { S.phase = 'done'; render(); watchPanel(); } else if (!j.done) pollJob(); else render(); return; }
+    render();
+  } catch (e) {
+    document.getElementById('app').innerHTML = '<div class="banner-err">' + esc(e.message) + '</div>';
+  }
+})();
+</script>
+</body>
+</html>
