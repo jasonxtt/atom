@@ -66,18 +66,22 @@ func (ins *Installer) upgrade(st *InstallState, log Logger) error {
 	}
 	oldSingBox := fileSHA256(p.Bin("sing-box"))
 
+	oldVersion := st.Version
 	err := ins.applyUpgrade(st, oldSingBox, log)
+	if err == nil {
+		st.Version, st.UpdatedAt = ins.Version, time.Now()
+		if err = writeJSON(p.State(), st); err != nil {
+			err = fmt.Errorf("记录新版本失败: %w", err)
+		}
+	}
 	if err != nil {
+		st.Version = oldVersion
 		log.Logf("升级失败：%v", err)
 		log.Logf("恢复备份")
 		if rerr := ins.restoreBackup(backup, st.PanelPort, log); rerr != nil {
 			return fmt.Errorf("%w（恢复备份也失败了：%v，备份在 %s）", err, rerr, backup)
 		}
 		return fmt.Errorf("%w（已恢复到 %s）", err, st.Version)
-	}
-	st.Version, st.UpdatedAt = ins.Version, time.Now()
-	if err := writeJSON(p.State(), st); err != nil {
-		return err
 	}
 	pruneBackups(p.Backup(), 3)
 	return nil
@@ -136,9 +140,18 @@ func (ins *Installer) backupItems() []backupItem {
 	}
 }
 
+const absentList = "absent.txt"
+
 func (ins *Installer) makeBackup(dir string) error {
+	var absent []string
+	defer func() {
+		if len(absent) > 0 {
+			os.WriteFile(filepath.Join(dir, absentList), []byte(strings.Join(absent, "\n")+"\n"), 0o644)
+		}
+	}()
 	for _, it := range ins.backupItems() {
 		if _, err := os.Stat(it.path); err != nil {
+			absent = append(absent, it.name)
 			continue
 		}
 		var err error
@@ -155,9 +168,18 @@ func (ins *Installer) makeBackup(dir string) error {
 }
 
 func (ins *Installer) restoreBackup(dir string, panelPort int, log Logger) error {
+	absent := map[string]bool{}
+	if data, err := os.ReadFile(filepath.Join(dir, absentList)); err == nil {
+		for _, n := range strings.Fields(string(data)) {
+			absent[n] = true
+		}
+	}
 	for _, it := range ins.backupItems() {
 		src := filepath.Join(dir, it.name)
 		if _, err := os.Stat(src); err != nil {
+			if absent[it.name] && (it.file || it.exact) {
+				os.RemoveAll(it.path) // the failed upgrade created it
+			}
 			continue
 		}
 		var err error

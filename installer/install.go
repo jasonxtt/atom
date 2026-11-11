@@ -139,7 +139,13 @@ func (ins *Installer) runInstall(cfg Config, j *Job) {
 			func() error { return ins.stepDeps(cfg, j) },
 			func() error { return ins.stepBinaries(j) },
 			func() error { return ins.stepConfig(cfg, j) },
-			func() error { networkTouched = true; return ins.stepNetwork(cfg, j) },
+			func() error {
+				if err := ins.checkRouteTable(); err != nil { // nothing has been changed yet: no teardown for a refusal
+					return err
+				}
+				networkTouched = true
+				return ins.stepNetwork(cfg, j)
+			},
 			func() error { return ins.stepStart(cfg, j) },
 			func() error { return ins.stepSettings(cfg, j) },
 			func() error { return ins.stepCheck(cfg, j) },
@@ -308,12 +314,16 @@ func routeConflict(rules, routes string) string {
 	return ""
 }
 
-func (ins *Installer) stepNetwork(cfg Config, j *Job) error {
+func (ins *Installer) checkRouteTable() error {
 	rules, _ := quietCmd("ip", "rule", "show")
 	routes, _ := quietCmd("ip", "route", "show", "table", routeTable)
 	if c := routeConflict(rules, routes); c != "" {
 		return fmt.Errorf("策略路由表 %s 已经被其他配置使用（%s），安装器不会动它", routeTable, c)
 	}
+	return nil
+}
+
+func (ins *Installer) stepNetwork(cfg Config, j *Job) error {
 	st := &InstallState{Version: ins.Version, InstalledAt: time.Now(), UpdatedAt: time.Now(), Topology: cfg.Topology, LAN: cfg.LAN, WAN: cfg.WAN,
 		PanelPort: cfg.PanelPort, NftBin: lookPathOr("nft", "/usr/sbin/nft"), SysctlBin: lookPathOr("sysctl", "/usr/sbin/sysctl")}
 	ch := loadChanges(ins.Paths)

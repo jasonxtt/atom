@@ -43,13 +43,23 @@ if ! command -v ss >/dev/null; then
   apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 >/dev/null || die "安装 iproute2 失败"
 fi
 
-# an installation that is running in the wizard must not be disturbed
-if systemctl is-active --quiet atom-installer.service && [ -s "$ROOT/run/installer.json" ]; then
-  wport="$(sed -n 's/.*"port": *\([0-9]*\).*/\1/p' "$ROOT/run/installer.json")"
-  if [ -n "$wport" ] && curl -fs --max-time 3 "http://127.0.0.1:${wport}/api/state" | grep -q '"running":true'; then
-    die "安装正在进行，等它完成后再运行"
+# An earlier wizard is asked to close (it refuses while an installation is running, and takes no new one after
+# it agreed), then waited for. Only a wizard that does not answer at all is stopped.
+stop_wizard() {
+  local wport code
+  if systemctl is-active --quiet atom-installer.service; then
+    wport="$(sed -n 's/.*"port": *\([0-9]*\).*/\1/p' "$ROOT/run/installer.json" 2>/dev/null || true)"
+    if [ -n "$wport" ]; then
+      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:${wport}/api/finish" || true)"
+      [ "$code" = 409 ] && die "安装正在进行，等它完成后再运行"
+    fi
+    for _ in $(seq 1 20); do
+      systemctl is-active --quiet atom-installer.service || break
+      sleep 0.5
+    done
+    systemctl stop atom-installer.service 2>/dev/null || true
   fi
-fi
+}
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -87,7 +97,7 @@ else
 fi
 
 PKG="$ROOT/pkg"
-systemctl stop atom-installer.service 2>/dev/null || true
+stop_wizard
 rm -rf "$PKG"
 mkdir -p "$PKG"
 tar -xzf "$PKGFILE" -C "$PKG" --strip-components=1 || die "解包失败"

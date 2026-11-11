@@ -30,6 +30,9 @@ type Server struct {
 	seen time.Time
 	quit chan struct{}
 	once sync.Once
+
+	closing bool       // finish was accepted: no new job
+	opMu    sync.Mutex // one free action at a time, and not while a job starts
 }
 
 func newServer(ins *Installer) *Server {
@@ -186,6 +189,12 @@ func (s *Server) handleFree(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad request")
 		return
 	}
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	if s.busyOrClosing() {
+		writeErr(w, 409, "正在安装或已结束")
+		return
+	}
 	occ, err := portOccupants(53)
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -262,6 +271,12 @@ func (s *Server) handleInstall(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad request")
 		return
 	}
+	s.opMu.Lock() // waits for a free action that is under way; nothing else changes the machine meanwhile
+	defer s.opMu.Unlock()
+	if s.busyOrClosing() {
+		writeErr(w, 409, "正在安装或已结束")
+		return
+	}
 	cfg.fillDefaults()
 	cfg.keepData = hasData(s.ins.Paths)
 	if probs := checkSystem().Problems; len(probs) > 0 {
@@ -276,17 +291,19 @@ func (s *Server) handleInstall(w http.ResponseWriter, r *http.Request) {
 		writeResp(w, 400, map[string]any{"error": "配置不对", "errors": errs})
 		return
 	}
-	s.mu.Lock()
-	if s.job != nil && !s.job.view(0).Done {
-		s.mu.Unlock()
-		writeErr(w, 409, "正在安装")
-		return
-	}
 	job := newJob(installSteps)
+	s.mu.Lock()
 	s.job = job
 	s.mu.Unlock()
 	go s.ins.runInstall(cfg, job)
 	writeResp(w, 202, map[string]bool{"started": true})
+}
+
+// busyOrClosing: an installation is running, or finish was accepted.
+func (s *Server) busyOrClosing() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closing || (s.job != nil && !s.job.view(0).Done)
 }
 
 func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
@@ -303,13 +320,16 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFinish(w http.ResponseWriter, r *http.Request) {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
 	s.mu.Lock()
-	running := s.job != nil && !s.job.view(0).Done
-	s.mu.Unlock()
-	if running {
+	if s.job != nil && !s.job.view(0).Done {
+		s.mu.Unlock()
 		writeErr(w, 409, "正在安装")
 		return
 	}
+	s.closing = true
+	s.mu.Unlock()
 	writeResp(w, 200, map[string]bool{"ok": true})
 	go func() {
 		time.Sleep(500 * time.Millisecond)

@@ -73,7 +73,9 @@ func restoreResolved(p Paths, ch *Changes, log Logger) error {
 		return nil
 	}
 	if data, err := os.ReadFile(resolvedDropIn); err == nil && strings.HasPrefix(string(data), resolvedMark) {
-		os.Remove(resolvedDropIn)
+		if err := os.Remove(resolvedDropIn); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 		os.Remove(filepath.Dir(resolvedDropIn)) // only if empty
 	}
 	if ch.ResolvConfLink != "" {
@@ -117,12 +119,14 @@ func freeUnit(p Paths, unit string, log Logger) error {
 	return runCmd(log, 60*time.Second, "systemctl", "stop", unit)
 }
 
-// restoreUnit puts a service back as it was: enabled (and started), or only started, or left alone.
+// restoreUnit puts a service back as it was: enabled or not, started or not.
 func restoreUnit(u UnitState, log Logger) error {
-	switch {
-	case u.WasEnabled:
-		return runCmd(log, 60*time.Second, "systemctl", "enable", "--now", u.Unit)
-	case u.WasActive:
+	if u.WasEnabled {
+		if err := runCmd(log, 60*time.Second, "systemctl", "enable", u.Unit); err != nil {
+			return err
+		}
+	}
+	if u.WasActive {
 		return runCmd(log, 60*time.Second, "systemctl", "start", u.Unit)
 	}
 	return nil

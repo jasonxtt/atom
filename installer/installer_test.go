@@ -626,3 +626,34 @@ func TestMakeBackupCoversEverythingTheUpgradeOverwrites(t *testing.T) {
 		t.Error("the user's data is not part of the backup")
 	}
 }
+
+func TestFinishAndInstallDoNotRace(t *testing.T) {
+	s := newServer(&Installer{Paths: Paths{Root: t.TempDir()}})
+	h := s.handler()
+	post := func(path string) int {
+		req := httptest.NewRequest("POST", path, strings.NewReader("{}"))
+		req.RemoteAddr = "127.0.0.1:5000"
+		req.Host = "127.0.0.1:9996"
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	s.job = newJob([]string{"a"}) // a running installation
+	if c := post("/api/finish"); c != 409 {
+		t.Errorf("finish while an installation runs: %d", c)
+	}
+	if c := post("/api/free"); c != 409 {
+		t.Errorf("a free action while an installation runs: %d", c)
+	}
+	s.job.finish(nil, 80)
+	if c := post("/api/finish"); c != 200 {
+		t.Errorf("finish after the job: %d", c)
+	}
+	if c := post("/api/install"); c != 409 {
+		t.Errorf("an installation after finish was accepted: %d", c)
+	}
+	if c := post("/api/free"); c != 409 {
+		t.Errorf("a free action after finish was accepted: %d", c)
+	}
+}
