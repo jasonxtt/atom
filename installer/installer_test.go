@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http/httptest"
@@ -571,6 +572,9 @@ func TestRouteConflict(t *testing.T) {
 	}
 	if c := routeConflict("", "default via 10.0.0.1 dev eth1\n"); c == "" {
 		t.Error("another route in table 233 is a conflict")
+	}
+	if r := tableRoutes("Error: ipv4: FIB table does not exist.\nDump terminated", errors.New("exit status 2")); routeConflict("", r) != "" {
+		t.Errorf("a table that was never created is free: %q", r)
 	}
 }
 

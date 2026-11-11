@@ -310,10 +310,18 @@ func routeConflict(rules, routes string) string {
 	return ""
 }
 
+// tableRoutes is the output of `ip route show table 233`. On a machine where the table was never created
+// the command fails with "FIB table does not exist": nothing uses it.
+func tableRoutes(out string, err error) string {
+	if err != nil && strings.Contains(out, "does not exist") {
+		return ""
+	}
+	return out
+}
+
 func (ins *Installer) checkRouteTable() error {
 	rules, _ := quietCmd("ip", "rule", "show")
-	routes, _ := quietCmd("ip", "route", "show", "table", routeTable)
-	if c := routeConflict(rules, routes); c != "" {
+	if c := routeConflict(rules, tableRoutes(quietCmd("ip", "route", "show", "table", routeTable))); c != "" {
 		return fmt.Errorf("策略路由表 %s 已经被其他配置使用（%s），安装器不会动它", routeTable, c)
 	}
 	return nil
