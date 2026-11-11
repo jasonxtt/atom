@@ -217,6 +217,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 - **内置规则集**：YAML 的 `builtin` 列出规则能直接引用的名字：`adguard`（`adguard_rule`，按 AdGuard 自己的屏蔽/放行匹配）、`geosite_cn`、`geosite_no_cn`（`unified_matcher1` 打标的名单，按 mapper 给它们打的 fast_mark 判断，所以 `$atom_rules` 要排在 `$unified_matcher1` 后面）。
 - **自定义规则集**：
   - 远程 URL：格式 text/YAML/JSON/SRS/`.dat`（要 `category`）/`.mrs`，下载后转换成本地列表；下载走 `main_proxy`（7890）。
+  - 第 6b 步 **[定]**：域名和网段由文件本身决定。SRS 一遍读出两种；规则集用不上的条目（进程名、端口、网络类型等）按编码读过去并按种类计入 `skipped`，每条都占解码配额；读不完整（文件损坏，或有不支持读取的条目，如 AdGuard 规则）就报错，记进 `last_error`，不替换已保存的列表。`.mrs` 按文件头的 behavior 读域名或网段。`.dat` 的分类带 `reverse_match` 或 cidr 字段就按 geoip 读，否则按 geosite 读；GeoIP 反向匹配（哪怕分类是空的）一律报错"不支持 GeoIP 反向匹配"。
   - 本地列表：通过 API 编辑，条目是 `domain:`/`full:`/`keyword:`/`regexp:`，不带前缀的条目当作 `domain:`。
   - 第一次下载失败时，规则集照样创建，记下 `last_error`，内容为空。刷新失败时保留旧内容。
   - 被规则引用的规则集不能删除，返回 409 和这些规则的 ID。
