@@ -216,7 +216,8 @@ func (ins *Installer) stepDeps(cfg Config, j *Job) error {
 	return saveChanges(ins.Paths, ch)
 }
 
-var installedBinaries = []string{"atomdns", "sing-box", "atom-installer"}
+// atom-installer first: once anything is installed, the uninstaller is there too.
+var installedBinaries = []string{"atom-installer", "atomdns", "sing-box"}
 
 func (ins *Installer) installBinaries(log Logger) error {
 	for _, name := range installedBinaries {
