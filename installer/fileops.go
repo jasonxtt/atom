@@ -11,12 +11,41 @@ import (
 	"strings"
 )
 
+// copyFileAtomic copies through a temporary file next to the target and renames, streaming (the programs are big).
 func copyFileAtomic(src, dst string, mode os.FileMode) error {
-	data, err := os.ReadFile(src)
+	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(dst, data, mode)
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	fail := func(err error) error {
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if _, err := io.Copy(tmp, in); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return err
+	}
+	if err := os.Rename(name, dst); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
 }
 
 // productOwned names the files of the shipped configuration an upgrade overwrites; every other file of the

@@ -110,3 +110,57 @@ func (a *apiClient) waitStatus(timeout time.Duration, done func(*apiStatus) bool
 		time.Sleep(time.Second)
 	}
 }
+
+type upstreamKey struct {
+	Protocol, Addr, Dial string
+	Proxy                bool
+}
+
+func keysOf(us []Upstream) []upstreamKey {
+	var out []upstreamKey
+	for _, u := range us {
+		if u.Enabled {
+			out = append(out, upstreamKey{u.Protocol, u.Addr, u.DialAddr, u.UseProxy})
+		}
+	}
+	return out
+}
+
+// sameUpstreams reports whether the group already has exactly these (enabled) upstreams.
+func (a *apiClient) sameUpstreams(tag string, want []Upstream) (bool, error) {
+	var resp struct {
+		Groups []struct {
+			Tag       string `json:"tag"`
+			Upstreams []struct {
+				Enabled  *bool  `json:"enabled"`
+				Protocol string `json:"protocol"`
+				Addr     string `json:"addr"`
+				DialAddr string `json:"dial_addr"`
+				UseProxy bool   `json:"use_proxy"`
+			} `json:"upstreams"`
+		} `json:"groups"`
+	}
+	if err := a.call("GET", "/upstreams", nil, &resp); err != nil {
+		return false, err
+	}
+	for _, g := range resp.Groups {
+		if g.Tag != tag {
+			continue
+		}
+		var have []Upstream
+		for _, u := range g.Upstreams {
+			have = append(have, Upstream{Enabled: u.Enabled == nil || *u.Enabled, Protocol: u.Protocol, Addr: u.Addr, DialAddr: u.DialAddr, UseProxy: u.UseProxy})
+		}
+		hk, wk := keysOf(have), keysOf(want)
+		if len(hk) != len(wk) {
+			return false, nil
+		}
+		for i := range hk {
+			if hk[i] != wk[i] {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
+	return false, fmt.Errorf("no upstream group %s", tag)
+}

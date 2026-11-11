@@ -107,6 +107,7 @@ type stateResp struct {
 		PanelPort int    `json:"panel_port"`
 	} `json:"installed,omitempty"`
 	Running bool `json:"running"`
+	HasData bool `json:"has_data"`
 }
 
 func (s *Server) state() stateResp {
@@ -114,6 +115,9 @@ func (s *Server) state() stateResp {
 		Defaults: defaults{defaultDomestic, defaultForeign, defaultFakeIP, defaultMixed, defaultPanel}}
 	if r.Ifaces == nil {
 		r.Ifaces = []Iface{}
+	}
+	if r.Addrs == nil {
+		r.Addrs = []string{}
 	}
 	if occ, err := portOccupants(53); err != nil {
 		r.ScanError = err.Error()
@@ -130,6 +134,7 @@ func (s *Server) state() stateResp {
 			PanelPort int    `json:"panel_port"`
 		}{st.Version, st.PanelPort}
 	}
+	r.HasData = hasData(s.ins.Paths)
 	s.mu.Lock()
 	r.Running = s.job != nil && !s.job.view(0).Done
 	s.mu.Unlock()
@@ -207,6 +212,7 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.fillDefaults()
+	cfg.keepData = hasData(s.ins.Paths)
 	errs := cfg.Validate(listInterfaces(), s.ins.InstallerPort, s.busy())
 	if errs == nil {
 		errs = []FieldError{}
@@ -221,6 +227,7 @@ func (s *Server) handleInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.fillDefaults()
+	cfg.keepData = hasData(s.ins.Paths)
 	if probs := checkSystem().Problems; len(probs) > 0 {
 		writeErr(w, 400, strings.Join(probs, "；"))
 		return

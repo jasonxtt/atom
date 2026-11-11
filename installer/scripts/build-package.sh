@@ -66,7 +66,7 @@ rm -f "$ARCHIVE"
 if tar --version 2>/dev/null | grep -q GNU; then
   tar -C "$STAGE" --owner=0 --group=0 --numeric-owner -czf "$ARCHIVE" "$NAME"
 else
-  COPYFILE_DISABLE=1 tar -C "$STAGE" --uid 0 --gid 0 --uname root --gname root -czf "$ARCHIVE" "$NAME"
+  COPYFILE_DISABLE=1 tar -C "$STAGE" --no-xattrs --no-mac-metadata --uid 0 --gid 0 --uname root --gname root -czf "$ARCHIVE" "$NAME"
 fi
 SUM="$(sha256 "$ARCHIVE")"
 sed -e "s|@VERSION@|$VERSION|g" -e "s|@SHA256@|$SUM|g" -e "s|@REPO@|$REPO|g" "$HERE/install.sh.in" > "$OUT/install.sh"

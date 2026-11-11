@@ -54,7 +54,7 @@ func checkOS(rel map[string]string) string {
 }
 
 func checkSystem() SystemInfo {
-	info := SystemInfo{Arch: runtime.GOARCH}
+	info := SystemInfo{Arch: runtime.GOARCH, Problems: []string{}}
 	info.Hostname, _ = os.Hostname()
 	data, _ := os.ReadFile("/etc/os-release")
 	rel := parseOSRelease(string(data))

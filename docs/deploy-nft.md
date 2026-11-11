@@ -1,6 +1,6 @@
 # 部署：nft、策略路由和拓扑
 
-第 4 步联调时写成，第 7 步的安装器按这里生成规则。设计依据见 [design.md](design.md) 第 9 节；这里是具体规则。
+第 4 步联调时写成，第 7 步的安装器（`installer/templates.go`）按这里生成规则，装在 `/opt/atom/etc/`（`atom.nft`、`atom-gateway.nft`）和 `/opt/atom/lib/policy-route.sh`；下面文件名里的 `/etc/atom/` 是联调时的位置。设计依据见 [design.md](design.md) 第 9 节；这里是具体规则。
 
 ## 1. 导进 sing-box 的流量
 

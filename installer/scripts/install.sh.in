@@ -82,6 +82,7 @@ tar -xzf "$PKGFILE" -C "$PKG" --strip-components=1 || die "解包失败"
 [ -x "$PKG/bin/atom-installer" ] || die "包里没有 atom-installer"
 
 if grep -qs '"complete": true' "$ROOT/etc/install.json"; then
+  systemctl stop atom-installer.service 2>/dev/null || true
   say "已安装 atom，升级…"
   exec "$PKG/bin/atom-installer" upgrade --pkg "$PKG"
 fi

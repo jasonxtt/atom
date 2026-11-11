@@ -86,8 +86,14 @@ async function api(method, path, body) {
   return data;
 }
 
-const STEPS = ['环境', '网络', 'DNS', 'sing-box', '安装'];
-const FIELD_STEP = { topology: 1, lan: 1, wan: 1, accept_gateway: 1, panel_port: 1, domestic: 2, foreign: 2, fakeip_range: 3, mixed_port: 3 };
+const FIELD_STEP = { topology: 'net', lan: 'net', wan: 'net', accept_gateway: 'net', panel_port: 'net', domestic: 'dns', foreign: 'dns', fakeip_range: 'sb', mixed_port: 'sb' };
+// the DNS and sing-box steps are skipped when the data of an earlier installation is there: its settings stay
+function steps() {
+  const all = [{ id: 'env', name: '环境', view: viewEnv }, { id: 'net', name: '网络', view: viewNet }, { id: 'dns', name: 'DNS', view: viewDNS },
+    { id: 'sb', name: 'sing-box', view: viewSB }, { id: 'confirm', name: '安装', view: viewConfirm }];
+  return S.state.has_data ? all.filter(x => x.id !== 'dns' && x.id !== 'sb') : all;
+}
+function stepId() { return steps()[S.step].id; }
 const S = { state: null, step: 0, cfg: null, errors: {}, freed: [], freeing: null, freeErr: '', job: null, jobNext: 0, log: [], phase: 'wizard', redirectTimer: null, paused: false };
 
 function initCfg(st) {
@@ -117,7 +123,7 @@ function viewEnv() {
   h += `<div class="row">${mark(!sys.problems.some(p => /Debian|Ubuntu/.test(p)))}<div class="grow">系统<div class="sub">${esc(sys.os || '未知')}　${esc(sys.arch)}</div></div></div>`;
   sys.problems.forEach(p => { h += `<div class="row"><span class="mark bad">✗</span><div class="grow">${esc(p)}</div></div>`; });
   S.freed.forEach(f => { h += `<div class="row"><span class="mark ok">✓</span><div class="grow">${esc(f)}<div class="sub">已处理完毕</div></div></div>`; });
-  if (st.port53.length === 0) {
+  if (st.port53.length === 0 && !st.scan_error) {
     h += `<div class="row">${mark(true)}<div class="grow">53 端口空闲</div></div>`;
   }
   st.port53.forEach((o, i) => {
@@ -185,9 +191,8 @@ function viewConfirm() {
   const rows = [
     ['拓扑', c.topology === 'gateway' ? `双网卡网关　LAN ${esc(c.lan.join(', '))}　WAN ${esc(c.wan)}` : `单网卡旁路由　${esc(c.lan[0] || '')}`],
     ['面板端口', esc(c.panel_port)],
-    ['国内上游', `${lines(c.domestic)} 个`], ['国外上游', `${lines(c.foreign)} 个`],
-    ['FakeIP 网段', esc(c.fakeip_range)], ['mixed 端口', esc(c.mixed_port)],
-    ['节点', c.nodes.trim() ? '导入' : '稍后在面板里添加'],
+    ...(S.state.has_data ? [['设置', '沿用已有数据']] : [['国内上游', `${lines(c.domestic)} 个`], ['国外上游', `${lines(c.foreign)} 个`], ['FakeIP 网段', esc(c.fakeip_range)], ['mixed 端口', esc(c.mixed_port)],
+      ['节点', c.nodes.trim() ? '导入' : '稍后在面板里添加']]),
   ];
   return `<div class="card"><h2>确认</h2><table class="sum">${rows.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td></tr>`).join('')}</table></div>`;
 }
@@ -236,9 +241,10 @@ function render() {
     return;
   }
   if (S.phase === 'wizard') {
-    h += '<div class="steps">' + STEPS.map((n, i) => `<span class="${i === S.step ? 'on' : i < S.step ? 'done' : ''}">${n}</span>`).join('') + '</div>';
-    h += [viewEnv, viewNet, viewDNS, viewSB, viewConfirm][S.step]();
-    const last = S.step === STEPS.length - 1;
+    const list = steps();
+    h += '<div class="steps">' + list.map((x, i) => `<span class="${i === S.step ? 'on' : i < S.step ? 'done' : ''}">${x.name}</span>`).join('') + '</div>';
+    h += list[S.step].view();
+    const last = S.step === list.length - 1;
     h += `<div class="nav"><button data-act="prev" ${S.step === 0 ? 'disabled' : ''}>上一步</button>` +
       (last ? '<button class="primary" data-act="install">开始安装</button>' : `<button class="primary" data-act="next" ${S.step === 0 && !envReady() ? 'disabled' : ''}>下一步</button>`) + '</div>';
   } else if (S.phase === 'progress') {
@@ -251,17 +257,17 @@ function render() {
   if (log) log.scrollTop = log.scrollHeight;
 }
 
-async function validate(step) {
+async function validate(id) {
   const r = await api('POST', '/api/validate', S.cfg);
   S.errors = {};
-  r.errors.forEach(e => { if (step === undefined || FIELD_STEP[e.field] === step) S.errors[e.field] = e.msg; });
+  r.errors.forEach(e => { if (id === undefined || FIELD_STEP[e.field] === id) S.errors[e.field] = e.msg; });
   return r.errors;
 }
 
 async function next() {
-  if (S.step >= 1) {
-    const errs = await validate(S.step);
-    if (errs.some(e => FIELD_STEP[e.field] === S.step)) { render(); return; }
+  if (stepId() !== 'env') {
+    const errs = await validate(stepId());
+    if (errs.some(e => FIELD_STEP[e.field] === stepId())) { render(); return; }
   }
   S.errors = {};
   S.step++;
@@ -271,8 +277,8 @@ async function next() {
 async function install() {
   const errs = await validate();
   if (errs.length) {
-    S.step = Math.min(...errs.map(e => FIELD_STEP[e.field] ?? 4));
-    if (S.step > 3) S.step = 3;
+    const ids = steps().map(x => x.id);
+    S.step = Math.min(...errs.map(e => Math.max(0, ids.indexOf(FIELD_STEP[e.field] || 'net'))));
     render();
     return;
   }
@@ -345,7 +351,7 @@ document.addEventListener('click', ev => {
   else if (a === 'prev') { S.errors = {}; S.step--; render(); }
   else if (a === 'install') install();
   else if (a === 'free') free(+b.dataset.i);
-  else if (a === 'back') { S.phase = 'wizard'; S.step = 4; render(); }
+  else if (a === 'back') { S.phase = 'wizard'; S.step = steps().length - 1; render(); }
   else if (a === 'retry') install();
   else if (a === 'open') openPanel();
   else if (a === 'pause') { S.paused = !S.paused; b.textContent = S.paused ? '继续跳转' : '暂停跳转'; if (!S.paused) watchPanel(); else clearTimeout(S.redirectTimer); const el = document.getElementById('countdown'); if (el && S.paused) el.textContent = ''; }

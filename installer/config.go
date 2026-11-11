@@ -18,6 +18,10 @@ type Config struct {
 	FakeIPRange   string   `json:"fakeip_range"`
 	MixedPort     int      `json:"mixed_port"`
 	Nodes         string   `json:"nodes"` // share links, Clash YAML or sing-box JSON; may be empty
+
+	// keepData is set by the server, not the client: the data of an earlier installation is there, and its
+	// settings, rules and nodes win over the DNS and sing-box answers.
+	keepData bool
 }
 
 const (
@@ -108,11 +112,16 @@ func (c *Config) Validate(ifaces []Iface, installerPort int, busy func(port int)
 		}
 		return true
 	}
-	if portOK("panel_port", c.PanelPort) && c.PanelPort == c.MixedPort {
+	if portOK("panel_port", c.PanelPort) && !c.keepData && c.PanelPort == c.MixedPort {
 		add("panel_port", "不能和 mixed 端口相同")
 	}
-	portOK("mixed_port", c.MixedPort)
+	if !c.keepData {
+		portOK("mixed_port", c.MixedPort)
+	}
 
+	if c.keepData {
+		return errs
+	}
 	if _, err := parseUpstreams(c.Domestic, false, "d"); err != nil {
 		add("domestic", "%v", err)
 	}

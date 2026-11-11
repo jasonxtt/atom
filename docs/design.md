@@ -1,6 +1,6 @@
 # atom 设计文档 v0
 
-状态：v0 已审，第 12 节的问题已答复；第 2 步实现时新定的事项写回了第 3、4、8 节，第 3 步的写回了第 4.6、5、6、8 节，第 4 步的写回了第 4.6、6、7.3、9.4、11 节，第 5 步的写回了第 4.5、7.2、8、11 节，第 6 步（6a）的写回了第 3.2、4.4、4.5.1、7.1、7.2、8、11 节。日期：2026-11-09。
+状态：v0 已审，第 12 节的问题已答复；第 2 步实现时新定的事项写回了第 3、4、8 节，第 3 步的写回了第 4.6、5、6、8 节，第 4 步的写回了第 4.6、6、7.3、9.4、11 节，第 5 步的写回了第 4.5、7.2、8、11 节，第 6 步（6a）的写回了第 3.2、4.4、4.5.1、7.1、7.2、8、11 节，第 7 步的写回了第 6、7.1、9.2、10、11 节。日期：2026-11-12。
 
 标记说明：**[定]** 表示已经和用户确认；**[建议]** 是我的提议，等审阅；**[待定]** 表示还要讨论。
 
@@ -34,7 +34,7 @@ FakeIP 流量 ─>│ FakeIP 还原域名 → 绑定的出口 / route.final → 
 |---|---|---|
 | atom | `atom/atomdns`：从 `jasonxtt/atomdns` main 分出 **[定]** | DNS 决策、规则表、控制面、管理 API、WebUI 托管 |
 | sing-box | `atom/sing-box`：分支 `atom/fakeip-outbound`，基于 v1.14.4 **[定]** | FakeIP、出口绑定、节点协议、节点组选择和测速 |
-| 安装器 | `atom/installer` **[建议]** | 安装两个程序和 systemd 服务，配置 nft、路由和 sysctl |
+| 安装器 | `atom/installer` **[定]** | 一条命令加网页向导：安装两个程序和 systemd 服务，配置 nft、路由和 `ip_forward`，升级和卸载（9.2） |
 
 - 两个进程之间只通过 DNS 和 HTTP 通信，不共享内存，也不用 cgo。
 - fork 和 AtomDNS 主线差得多没关系，好用优先。**[定]** 主线的修复按需合并过来，不承诺跟进。
@@ -323,7 +323,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 
 第 3 步定下和实现的 **[定]**：
 
-- **进程管理**：sing-box 跑在独立的 systemd 单元 `atom-sing-box.service` 里（单元文件由第 7 步的安装器写，`ExecReload=kill -HUP $MAINPID`，`Restart=on-failure`）。atom 写完配置后执行 `systemctl reload-or-restart atom-sing-box.service`：单元在运行就发 SIGHUP，没在运行（第一次）就启动它。sing-box 崩了由 systemd 拉起，atom 重启不影响代理。
+- **进程管理**：sing-box 跑在独立的 systemd 单元 `atom-sing-box.service` 里（单元文件由安装器写，`ExecReload=kill -HUP $MAINPID`，`Restart=on-failure`）。atom 写完配置后执行 `systemctl reload-or-restart atom-sing-box.service`：单元在运行就发 SIGHUP，没在运行（第一次）就启动它。sing-box 崩了由 systemd 拉起，atom 重启不影响代理。
 - **位置**：配置和 `cache.db` 放在 atom 配置根下的 `sing-box/`。程序路径、工作目录、重载命令、Clash API 地址（`127.0.0.1:9090`）、FakeIP DNS 入站（`127.0.0.1:6666`）、本机 AtomDNS 地址（`127.0.0.1:53`）、redirect 7892 / tproxy 7893、默认 resolver 来自哪个上游组（`domestic`）、nft 表名（`atom`，第 4 步加，见 9.4）写在自带 YAML 里 `atom_rules` 插件的 `singbox` 段，不对用户开放。
 - **重载失败不退出**（参考 PR15 后定，sing-box 补丁）：上游 v1.14.4 收到 SIGHUP 后先关掉旧实例；新配置如果通过了 `check` 却启动失败（端口被占用这类运行期错误），进程会直接退出，要等 atom 回滚、systemd 重启，中间代理和国外 DNS 都断。补丁让 `cmd_run.go` 记住上一份成功运行过的配置，新实例启动失败时用它在内存里把旧实例重建出来，进程不退出。atom 这边不用改：旧实例不认新密钥，确认照样失败，atom 写回旧文件再重载一次，最后运行的还是旧配置。
 - **确认新配置生效**：每次应用都生成新的随机 Clash API 密钥写进配置。旧实例不认新密钥，所以用新密钥在 20 秒内拿到 `/proxies`（里面有 `final`）就证明新配置已经在跑。代价：本机接了第三方 Clash 面板的话，每次应用后要重新填密钥（Clash API 只监听 127.0.0.1）。
@@ -353,7 +353,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 | AtomDNS 原有的 WebUI 和规则名单 API | 第 6 步删除接口（6a）；`webui-log/` 前端工程在 6b 换成新 WebUI 时删除。删掉的 HTTP 接口：`/plugins/{tag}/...`（名单的 show/save/post、规则源的 config/rules/update、缓存的 flush/dump/load_dump、`requery`、`webinfo`、重写、域名学习、`domain_output`）、`/api/v1/special-groups`、`/api/v1/upstream/*`、`/api/v1/capabilities`、`/api/v1/settings/effective`、`/api/v1/flags*`、`/api/v1/cache/settings*`、`/api/v1/cache/inventory`、`/api/v1/learning/settings`、`/api/v1/overrides`、`/api/v1/domain-generation`、`/api/v1/system/webui-port`、`/api/v1/system/restart`（连同进程内重启），都返回 404。它们背后还被保留的功能用着的部分改走 atom 接口（7.2、第 8 节）。`requery` 定时任务在进程内调用缓存和学习名单的 save/flush，这些 `/plugins` 路由保留为进程内入口，不对 HTTP 开放。保留的原有接口：`/api/v1/system/health`、`/metrics`、审计（`/api/v1/audit/*`、`/api/v2/audit/*`）、诊断抓取（`/api/v1/capture/*`），都只读或只管诊断，不在 OpenAPI 规范里，不承诺稳定 |
 | YAML 配置 | 由产品自带，用户不改。放在 fork 的 `config/`，来自 `jasonxtt/file` 的 `atomdns/config/full/config_rust`（v0.6.4，schema 7），改动见 `config/README.md` |
 | sing-box `cache_file.store_fakeip` | 固定开 |
-| 管理 API 监听地址 | 监听局域网，暂不做登录鉴权 **[定]** |
+| 管理 API 监听地址 | 监听局域网，暂不做登录鉴权 **[定]**；端口由安装器写入，默认 80（第 7 步） |
 
 ### 7.2 开放（通过控制面 API 修改）
 
@@ -432,11 +432,33 @@ DNS 和代理在同一台 VM 上。客户端的 DNS 指向这台 VM；FakeIP 网
 
 VM 上：TCP 用 redirect，UDP 用 TProxy，只处理目标是 FakeIP 网段和 IP 规则网段的流量。sing-box 自己发出去的流量目标是真实 IP，不会被再导回来。安装器检测网卡数量，生成对应的 nft 规则。具体规则写在单独的部署文档里，参考 xray 那台机器现有的规则。
 
-### 9.2 安装器
+### 9.2 安装器（第 7 步）**[定]**
 
-- 下载配套版本的 atom 和 sing-box，安装 systemd 服务、默认配置、WebUI。
-- 配置 nft、策略路由（TProxy 需要 fwmark 和本地路由表）、`ip_forward`。
-- 提示用户：在主路由上添加 FakeIP 静态路由；把 DHCP 下发的 DNS 改成这台 VM。
+一条命令装好，其余在浏览器里做。代码在 `installer/`，说明见 [installer/README.md](../installer/README.md)。
+
+- **三层**：用户粘贴 `curl -fsSL <地址>/install.sh | sudo bash`；脚本装好 `atom-installer`（Go 标准库写的单个静态程序，向导页面内嵌）并打印"请在浏览器打开 http://<IP>:<端口>/"；浏览器里配好 DNS 和 sing-box 的基础设置，确定后自动跳转到面板。装完安装器自己退出。
+- **下载**（脚本）：配套包 `atom-<版本>-linux-amd64.tar.gz`（一个包：atomdns、补丁版 sing-box、`atom-installer`、`atom-webui.tar.gz`、默认配置、`manifest.json`），来源按顺序试：GitHub Release 直连，然后加速前缀（`gh-proxy.com`、`ghfast.top`、`ghproxy.net`，可用 `ATOM_MIRRORS` 改）。连接 6 秒没通，或速度低于 50 KB/s 持续 10 秒，就换下一个。包的 sha256 在发版时写进 `install.sh`，任何来源下载的都要校验，不过就丢弃换下一个（加速源是第三方）。`ATOM_PKG` 可以指定本地包或地址（开发和离线用）。第 7 步没有发布 Release：下载路径用本地模拟的"GitHub 不通、慢镜像、好镜像"验证过，没有真实访问过 GitHub 上的包；公共加速源的可用性会变（2026-11-11 探测：`gh-proxy.com`、`ghfast.top` 通，`ghproxy.net` 超时，`mirror.ghproxy.com` 连不上），上线前要再核。
+- **向导**（`web/index.html`，只放标签、错误和两处必须的提示：网关形态的警告，完成页的主路由/DHCP 设置）：
+  1. 环境：系统（Debian 12+、Ubuntu 22.04+、x86_64、systemd、root）；53 端口被占时列出占用者并给按钮：systemd-resolved 的 stub 写 drop-in 关掉并把 `/etc/resolv.conf` 指到上游列表，其他 systemd 服务停止并禁用，不是服务的只提示；做完显示"已处理完毕"。
+  2. 网络：单网卡旁路由或双网卡网关，选网卡；选网关必须勾选"LAN 全部流量经过本机"；面板端口，默认 **80**。
+  3. DNS：国内、国外上游（默认值是产品配置里的，只在和现在的不同时才写）。
+  4. sing-box：FakeIP 网段、mixed 端口、可选导入节点（放进"默认代理"组，否则装完国外流量全被拒绝）。
+  5. 确认并安装：实时进度，装完自检，倒计时跳转面板。
+- **访问控制 [定]**：安装器不要令牌；默认端口 9996，被占就由系统另选一个空闲端口。只接受私网和回环来源的请求，闲置 30 分钟自动退出，装完 5 分钟内无人使用也退出。
+- **装到哪里 [定]**：全部在 `/opt/atom/`：`bin/`（atomdns、sing-box、atom-installer）、`etc/`（nft 规则、`install.json`、`changes.json`）、`lib/policy-route.sh`、`data/`（配置根，atomdns 的 `-d`）、`backup/`。`/opt/atom` 之外只有两个 systemd 单元 `atom-dns.service`、`atom-sing-box.service`，以及用"停用系统 DNS 占用"时写的 resolved drop-in 和 `/etc/resolv.conf` 的链接；`ip_forward` 由 `atom-dns.service` 的 `ExecStartPre` 设置，不写 `/etc/sysctl.d`。`changes.json` 记录安装器改过的系统设置（resolved、停用的服务、`ip_forward` 原值、装过的软件包），卸载按它还原。产品配置里 sing-box 的路径是 `/opt/atom/bin/sing-box`。
+- **安装步骤**：依赖（缺 nftables、iproute2 就 apt 装）→ 程序 → 配置（`data/` 和 `ui/main/`，面板端口写进 `config_custom.yaml` 的 `api.http`）→ 网络（`nft -c` 校验后写 nft 规则、策略路由脚本和两个单元；`atom-dns.service` 的 `ExecStartPre` 依次加载 `atom.nft`、网关形态再加 `atom-gateway.nft` 和 `sysctl -w net.ipv4.ip_forward=1`、`policy-route.sh`，见 deploy-nft.md 第 4 节）→ 启动（有上次留下的 sing-box 配置就先重启 sing-box，再重启 atomdns）→ 设置（调用 atomdns 的 API；失败只警告，面板里可以改）→ 自检（两个服务、端口、`status` 里 sing-box 与配置一致，`www.google.com` 得到 FakeIP、`www.baidu.com` 得到真实 IP；DNS 自检只警告）。
+- **失败**：任何一步失败，撤销网络部分（停服务、删 nft 表、`ip rule`、恢复 `ip_forward`），文件和已做的 53 端口处理保留，页面显示错误和日志，可以返回修改或重试。
+- **重复运行和数据**：向导完成时在 `data/.atom-data` 留一个标记。有标记（卸载时保留了数据）就沿用里面的设置、规则和节点，向导只问环境和网络，DNS 与 sing-box 两步不出现；没有标记（第一次，或上一次没装完）时，向导的值和 atomdns 现在的值比较，不同才写。
+- **升级**：再粘贴同一条命令。已装好（`install.json` 里 `complete`）就由新包里的 `atom-installer upgrade` 做：同版本什么都不做，更旧的拒绝（`--force` 可以）；先备份程序、nft 规则、单元和自带配置到 `backup/`（留最近 3 份），再换程序、覆盖自带配置（`config_custom.yaml`、`sub_config/`、`rule/atom_catalog.json`、`ui/main/`），保留 `webinfo/`、每日更新下载的规则和缓存，重新生成 nft 规则和单元，重启 atom-dns（sing-box 程序变了才重启它）；atomdns 的接口起不来或 sing-box 没有处于最新配置，就恢复备份并等服务恢复。
+- **卸载**：`/opt/atom/bin/atom-installer uninstall [--purge] [--yes]`：停服务，删单元、nft 表、`ip rule`，还原 `ip_forward`、resolved 和被停用的服务，删 `/opt/atom` 下除 `data/` 外的全部文件；`--purge` 连数据一起删。装过的软件包（nftables）不卸载。
+- **验证（第 7 步，2026-11-12，测试机 `ssh 77`：干净的 Debian 13，2 核 2G，没有 nft，systemd-resolved 占着 53）**：
+  - 用 `ATOM_PKG` 加两个假镜像（一个限速、一个正常，GitHub 地址指向不存在的仓库）跑 `install.sh`：慢镜像被丢弃，好镜像下载、sha256 校验通过，起向导。
+  - 浏览器里走完整个向导（环境里点"停用系统 DNS 占用"→ 已处理完毕；单网卡旁路由，网卡是接 netns 客户端的 veth，改了国内上游和 mixed 端口，导入一个 socks 节点；`apt` 装上 nftables），自动跳转到 80 端口的面板，概览页正常。
+  - 客户端（netns）：`www.google.com` 得到 FakeIP，TCP 经 nft redirect 进 sing-box、从节点出去（节点那一侧的 sing-box 日志看到连接），UDP（NTP）经 TProxy 进 sing-box，mixed 端口走 socks5h 通；`www.baidu.com` 得到真实 IP。
+  - 双网卡网关（面板端口 8080）：`ip_forward` 变成 1，`atom_nat` 表在；客户端默认网关指向本机，FakeIP 流量进 sing-box，其他流量经 NAT 转发出去而不经过 sing-box；卸载后 `ip_forward` 回到 0、nft 表和 `ip rule` 都没了。
+  - 同版本再运行：提示"已经是 0.1.0"；升级到 0.1.1：规则（一条自己加的规则）保留，两个服务正常；升级到一个起不来的 0.1.2：恢复备份，服务和代理照常。
+  - 卸载保留数据后重装（沿用规则和设置，向导跳过 DNS 和 sing-box 步骤）、`--purge`、装到一半失败（atomdns 起不来）时撤销网络部分，resolved 的还原，安装器端口被占时随机选端口，都验证过。
+  - 没验证：从 GitHub 实际下载（没有 Release）、真实主路由下的单网卡形态（第 4 步已说明）、Ubuntu、公共加速源在国内网络下的表现。
 
 ### 9.3 不处理的绕过路径
 
@@ -462,7 +484,7 @@ atom/
   docs/        设计、补丁说明、API 规范、部署文档
   atomdns/     AtomDNS fork（独立 git 仓库，分支 atom/main；自带的 YAML 配置在 atomdns/config/）
   sing-box/    sing-box fork（独立 git 仓库，分支 atom/fakeip-outbound）
-  installer/   安装器（以后）
+  installer/   安装器（Go 程序 + 一条命令的脚本 + 打包脚本）
 ```
 
 - fork 自带的 YAML 配置放在 `atomdns/config/`：从 `jasonxtt/file` 的 `atomdns/config/full/config_rust`（v0.6.4，schema 7）复制过来，锁定改动直接改这份，不动 file 仓库，改动记在 `atomdns/config/README.md`。**[定]**
@@ -488,7 +510,7 @@ atom/
        - 编辑节点时遇到 409，冲突面板只列名称、类型、地址和端口。别人只改了传输参数时，用户看不出来，点"仍然保存"会覆盖掉。家用单人管理，概率低。
        - 整组测速只把直接成员里没回结果的节点记为失败。sing-box 会递归测子组，子组里失败的节点不记失败，可能显示"未测速"。
        - 测速失败只记在页面内存里（sing-box 测速失败会清掉该节点的历史），刷新浏览器后丢失。
-7. **安装器**。
+7. **安装器**（已完成，2026-11-12；设计、行为和验证见 9.2，说明见 [installer/README.md](../installer/README.md)）：一条命令加网页向导，装到 `/opt/atom/`，支持升级、卸载、保留数据重装、失败撤销；配套包由 `installer/scripts/build-package.sh` 组装。同时清理了 atomdns 里旧的发布流程（在线更新清单、Docker 镜像脚本和工作流、`docs/rust/docker.md`，`release.md` 改写成 atom 的打包步骤）。
 
 每一步都单独验收后再进行下一步。实施顺序已认可。**[定]**
 

@@ -159,17 +159,20 @@ func cmdUpgrade(args []string) int {
 	switch c := compareVersions(ins.Version, st.Version); {
 	case c == 0 && !*force:
 		fmt.Printf("已经是 %s\n", st.Version)
+		os.RemoveAll(ins.Paths.Pkg())
 		return 0
 	case c < 0 && !*force:
 		fmt.Fprintf(os.Stderr, "包的版本 %s 比已装的 %s 旧；要降级请加 --force\n", ins.Version, st.Version)
+		os.RemoveAll(ins.Paths.Pkg())
 		return 1
 	}
 	fmt.Printf("升级 %s → %s\n", st.Version, ins.Version)
-	if err := ins.upgrade(st, stdoutLogger{}); err != nil {
+	err = ins.upgrade(st, stdoutLogger{})
+	os.RemoveAll(ins.Paths.Pkg())
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "升级失败：", err)
 		return 1
 	}
-	os.RemoveAll(ins.Paths.Pkg())
 	fmt.Printf("升级完成，面板端口 %d\n", st.PanelPort)
 	return 0
 }

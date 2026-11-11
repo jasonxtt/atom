@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"compress/gzip"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -488,5 +489,18 @@ func TestPruneBackups(t *testing.T) {
 	e, _ := os.ReadDir(dir)
 	if len(e) != 3 || e[0].Name() != "0.1.0-3" {
 		t.Errorf("%v", e)
+	}
+}
+
+func TestStateJSONHasNoNulls(t *testing.T) {
+	s := newServer(&Installer{Paths: Paths{Root: t.TempDir()}})
+	data, err := json.Marshal(s.state())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"problems", "ifaces", "addrs", "port53"} {
+		if strings.Contains(string(data), `"`+field+`":null`) {
+			t.Errorf("%s is null: the wizard page calls array methods on it", field)
+		}
 	}
 }

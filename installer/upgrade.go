@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,12 +43,16 @@ func versionParts(v string) [3]int {
 }
 
 func fileSHA256(path string) string {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return ""
 	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // upgrade replaces the programs and the shipped configuration, keeps the data, and goes back to the
@@ -65,7 +70,7 @@ func (ins *Installer) upgrade(st *InstallState, log Logger) error {
 	if err != nil {
 		log.Logf("升级失败：%v", err)
 		log.Logf("恢复备份")
-		if rerr := ins.restoreBackup(backup, log); rerr != nil {
+		if rerr := ins.restoreBackup(backup, st.PanelPort, log); rerr != nil {
 			return fmt.Errorf("%w（恢复备份也失败了：%v，备份在 %s）", err, rerr, backup)
 		}
 		return fmt.Errorf("%w（已恢复到 %s）", err, st.Version)
@@ -136,7 +141,7 @@ func (ins *Installer) makeBackup(dir string) error {
 	return nil
 }
 
-func (ins *Installer) restoreBackup(dir string, log Logger) error {
+func (ins *Installer) restoreBackup(dir string, panelPort int, log Logger) error {
 	p := ins.Paths
 	for _, it := range ins.backupItems() {
 		src := filepath.Join(dir, it[1])
@@ -164,7 +169,14 @@ func (ins *Installer) restoreBackup(dir string, log Logger) error {
 	if err := runCmd(log, 60*time.Second, "systemctl", "restart", dnsUnitName); err != nil {
 		return err
 	}
-	return runCmd(log, 60*time.Second, "systemctl", "restart", singBoxUnitName)
+	if err := runCmd(log, 60*time.Second, "systemctl", "restart", singBoxUnitName); err != nil {
+		return err
+	}
+	if _, err := newAPIClient(panelPort).waitStatus(60*time.Second, func(s *apiStatus) bool { return s.SingBox.Running && s.SingBox.InSync }); err != nil {
+		return fmt.Errorf("恢复后服务没有起来: %w", err)
+	}
+	log.Logf("已恢复，服务正常")
+	return nil
 }
 
 func pruneBackups(dir string, keep int) {

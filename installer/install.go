@@ -92,7 +92,7 @@ func (j *Job) view(since int) JobView {
 	if since < 0 || since > len(j.log) {
 		since = 0
 	}
-	return JobView{Steps: append([]stepState(nil), j.steps...), Log: append([]string(nil), j.log[since:]...), Next: len(j.log),
+	return JobView{Steps: append([]stepState(nil), j.steps...), Log: append([]string{}, j.log[since:]...), Next: len(j.log),
 		Done: j.done, OK: j.ok, Error: j.errMsg, Warnings: append([]string(nil), j.warnings...), PanelPort: j.panel, Hints: j.hints}
 }
 
@@ -106,6 +106,17 @@ func (j *Job) finish(err error, panel int) {
 	} else {
 		j.panel = panel
 	}
+}
+
+const defaultGroup = "g-default"
+
+// dataMarker is written when an installation completes: the data directory then holds settings, rules and
+// nodes that a later installation over it keeps.
+func dataMarker(p Paths) string { return filepath.Join(p.Data(), ".atom-data") }
+
+func hasData(p Paths) bool {
+	_, err := os.Stat(dataMarker(p))
+	return err == nil
 }
 
 var installSteps = []string{"依赖", "程序", "配置", "网络", "启动", "设置", "自检"}
@@ -156,6 +167,9 @@ func (ins *Installer) runInstall(cfg Config, j *Job) {
 	if err == nil {
 		st.Complete, st.UpdatedAt = true, time.Now()
 		err = writeJSON(ins.Paths.State(), st)
+	}
+	if err == nil {
+		err = writeJSON(dataMarker(ins.Paths), map[string]string{"version": ins.Version})
 	}
 	if err != nil {
 		j.Logf("记录安装结果失败：%v", err)
@@ -295,6 +309,14 @@ func (ins *Installer) stepStart(cfg Config, j *Job) error {
 	if err := runCmd(j, 30*time.Second, "systemctl", "enable", dnsUnitName); err != nil {
 		return err
 	}
+	// A configuration left by an earlier installation is in sync with the settings atomdns finds, so atomdns
+	// would not start sing-box: start it here. Without one, atomdns applies the first configuration and starts it.
+	if _, err := os.Stat(filepath.Join(ins.Paths.Data(), "sing-box", "config.json")); err == nil {
+		if err := runCmd(j, 60*time.Second, "systemctl", "restart", singBoxUnitName); err != nil {
+			ins.journal(j, singBoxUnitName)
+			return err
+		}
+	}
 	if err := runCmd(j, 60*time.Second, "systemctl", "restart", dnsUnitName); err != nil {
 		ins.journal(j, dnsUnitName)
 		return err
@@ -322,43 +344,90 @@ func (ins *Installer) stepSettings(cfg Config, j *Job) error {
 		return fmt.Errorf("sing-box 没有起来: %w", err)
 	}
 	j.Logf("sing-box 已启动")
-	put := func(what, path string, body any) {
-		if err := api.call("PUT", path, body, nil); err != nil {
-			j.warn("%s 没有应用（可以在面板里改）：%v", what, err)
-		} else {
-			j.Logf("已应用 %s", what)
+	if cfg.keepData {
+		j.Logf("沿用已有的设置、规则和节点")
+		return nil
+	}
+	warn := func(what string, err error) { j.warn("%s 没有应用（可以在面板里改）：%v", what, err) }
+	for _, g := range []struct {
+		tag, what, text string
+		foreign         bool
+		prefix          string
+	}{{"domestic", "国内上游", cfg.Domestic, false, "d"}, {"foreign", "国外上游", cfg.Foreign, true, "f"}} {
+		want, _ := parseUpstreams(g.text, g.foreign, g.prefix)
+		same, err := api.sameUpstreams(g.tag, want)
+		switch {
+		case err != nil:
+			warn(g.what, err)
+		case same:
+		default:
+			if err := api.call("PUT", "/upstreams/"+g.tag, map[string]any{"upstreams": want}, nil); err != nil {
+				warn(g.what, err)
+			} else {
+				j.Logf("已应用 %s", g.what)
+			}
 		}
 	}
-	if normalizeLines(cfg.Domestic) != normalizeLines(defaultDomestic) {
-		ups, _ := parseUpstreams(cfg.Domestic, false, "d")
-		put("国内上游", "/upstreams/domestic", map[string]any{"upstreams": ups})
+	var cur struct {
+		FakeIPRange string `json:"fakeip_range"`
+		MixedPort   int    `json:"mixed_port"`
 	}
-	if normalizeLines(cfg.Foreign) != normalizeLines(defaultForeign) {
-		ups, _ := parseUpstreams(cfg.Foreign, true, "f")
-		put("国外上游", "/upstreams/foreign", map[string]any{"upstreams": ups})
-	}
-	settings := map[string]any{}
-	if strings.TrimSpace(cfg.FakeIPRange) != defaultFakeIP {
-		settings["fakeip_range"] = strings.TrimSpace(cfg.FakeIPRange)
-	}
-	if cfg.MixedPort != defaultMixed {
-		settings["mixed_port"] = cfg.MixedPort
-	}
-	if len(settings) > 0 {
-		put("sing-box 设置", "/settings", settings)
+	if err := api.call("GET", "/settings", nil, &cur); err != nil {
+		warn("sing-box 设置", err)
+	} else {
+		change := map[string]any{}
+		if r := strings.TrimSpace(cfg.FakeIPRange); r != cur.FakeIPRange {
+			change["fakeip_range"] = r
+		}
+		if cfg.MixedPort != cur.MixedPort {
+			change["mixed_port"] = cfg.MixedPort
+		}
+		if len(change) > 0 {
+			if err := api.call("PUT", "/settings", change, nil); err != nil {
+				warn("sing-box 设置", err)
+			} else {
+				j.Logf("已应用 sing-box 设置")
+			}
+		}
 	}
 	if strings.TrimSpace(cfg.Nodes) != "" {
-		var out struct {
-			Nodes []any `json:"nodes"`
-		}
-		err := api.call("POST", "/nodes", map[string]any{"format": nodeFormat(cfg.Nodes), "content": cfg.Nodes}, &out)
+		ids, err := importNodes(api, cfg.Nodes)
 		if err != nil {
-			j.warn("节点没有导入（可以在面板里导入）：%v", err)
+			warn("节点", err)
 		} else {
-			j.Logf("已导入 %d 个节点", len(out.Nodes))
+			j.Logf("已导入 %d 个节点，放进「默认代理」组", len(ids))
 		}
 	}
 	return nil
+}
+
+// importNodes imports the pasted nodes and makes them the members of the built-in default group; a node that
+// is in no group carries no traffic, and the default group is what Final selects.
+func importNodes(api *apiClient, text string) ([]string, error) {
+	var out struct {
+		Nodes []struct {
+			ID string `json:"id"`
+		} `json:"nodes"`
+	}
+	if err := api.call("POST", "/nodes", map[string]any{"format": nodeFormat(text), "content": text}, &out); err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(out.Nodes))
+	for i, n := range out.Nodes {
+		ids[i] = n.ID
+	}
+	var g struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+	}
+	if err := api.call("GET", "/groups/"+defaultGroup, nil, &g); err != nil {
+		return ids, fmt.Errorf("节点已导入，但读不到默认组：%w", err)
+	}
+	body := map[string]any{"name": g.Name, "type": g.Type, "members": ids}
+	if err := api.call("PUT", "/groups/"+defaultGroup, body, nil); err != nil {
+		return ids, fmt.Errorf("节点已导入，但没能放进默认组：%w", err)
+	}
+	return ids, nil
 }
 
 func (ins *Installer) stepCheck(cfg Config, j *Job) error {
@@ -377,12 +446,19 @@ func (ins *Installer) stepCheck(cfg Config, j *Job) error {
 		}
 	}
 	j.Logf("两个服务都在运行，atomdns %s", st.AtomDNS.Version)
+	var cur struct {
+		FakeIPRange string `json:"fakeip_range"`
+		MixedPort   int    `json:"mixed_port"`
+	}
+	if err := api.call("GET", "/settings", nil, &cur); err != nil {
+		return err
+	}
 	ls, err := listeners()
 	if err == nil {
 		for _, want := range []struct {
 			port int
 			what string
-		}{{53, "DNS"}, {cfg.PanelPort, "面板"}, {cfg.MixedPort, "mixed 代理"}, {7892, "redirect"}, {7893, "TProxy"}} {
+		}{{53, "DNS"}, {cfg.PanelPort, "面板"}, {cur.MixedPort, "mixed 代理"}, {7892, "redirect"}, {7893, "TProxy"}} {
 			found := false
 			for _, l := range ls {
 				if l.Port == want.port {
@@ -395,7 +471,7 @@ func (ins *Installer) stepCheck(cfg Config, j *Job) error {
 		}
 		j.Logf("端口都在监听")
 	}
-	_, fake, ferr := net.ParseCIDR(strings.TrimSpace(cfg.FakeIPRange))
+	_, fake, ferr := net.ParseCIDR(cur.FakeIPRange)
 	if ferr != nil {
 		return ferr
 	}
