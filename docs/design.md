@@ -479,6 +479,10 @@ atom/
 6. **简易 WebUI + OpenAPI 规范定稿**，拆成两步 **[定]**：
    - **6a 后端定稿**（已完成，2026-11-09；见 4.4、7.1、7.2、第 8 节）：OpenAPI 规范 `atomdns/docs/api/openapi.yaml`（redocly lint 无错误无警告，`ROUTES` 一致性测试）；新接口 `dns`、`upstreams`、`ddns`、`rewrite`，内置规则集可以刷新；删除专属分流组的代码、AtomDNS 原有的管理接口（27 条在测试机上逐条确认是 404）和背后只给它们用的写入路径；黑名单、白名单、灰名单删除，`cuscn`、`cusnocn` 成为内置规则集并进入默认规则表。全量 `cargo test --workspace` 1531 个通过、0 失败（删掉了只测已删接口的测试，借旧接口做探针的测试改走进程内入口）。测试机（mosdns-rust，运行时 drop-in 指向 `/root/atom-step6/bin/atomdns` 和新配置根 `/root/atom-step6/root`，sing-box 仍是第 5 步的构建，没有永久替换）上新装状态验证：默认规则表 4 条；代理修正的域名拿到 FakeIP、直连修正的拿到真实 IP；`dns`、`upstreams`、`ddns`、`rewrite` 改了即生效、重写的域名直接应答；`cusnocn`、`geosite_cn` 经 7890 刷新成功。客户端分流（`client_routing`）删除，规则的客户端条件加了取反（`client_invert`，4.2）。没做：`HOST_API_LEVEL` 升级放到 6b，和新 WebUI 一起。
    - **6b 简易 WebUI**：新写的 Vue 3 + Vite 工程（`atomdns/webui/`），按规范实现，删除 `webui-log/`，测试机上跑完整流程。
+     - **已知限制**（6b-3b，codex 第 3 轮，用户决定不改）：
+       - 编辑节点时遇到 409，冲突面板只列名称、类型、地址和端口。别人只改了传输参数时，用户看不出来，点"仍然保存"会覆盖掉。家用单人管理，概率低。
+       - 整组测速只把直接成员里没回结果的节点记为失败。sing-box 会递归测子组，子组里失败的节点不记失败，可能显示"未测速"。
+       - 测速失败只记在页面内存里（sing-box 测速失败会清掉该节点的历史），刷新浏览器后丢失。
 7. **安装器**。
 
 每一步都单独验收后再进行下一步。实施顺序已认可。**[定]**
