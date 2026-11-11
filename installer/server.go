@@ -4,8 +4,10 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -49,6 +51,40 @@ func isPrivateRemote(remoteAddr string) bool {
 	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
 }
 
+// hostAllowed refuses a Host header that is not an address, localhost or this machine's own name: a web page
+// that makes the browser reach the wizard through a name of its own (DNS rebinding) is not the user.
+func hostAllowed(host string) bool {
+	h := host
+	if hh, _, err := net.SplitHostPort(host); err == nil {
+		h = hh
+	}
+	h = strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")
+	if net.ParseIP(h) != nil || strings.EqualFold(h, "localhost") {
+		return true
+	}
+	name, _ := os.Hostname()
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	h = strings.ToLower(strings.TrimSuffix(h, "."))
+	return name != "" && (h == name || h == name+".local" || h == name+".lan")
+}
+
+// sameOriginRequest keeps other web pages from driving the wizard through the user's browser: a request that
+// changes something must be JSON (which a cross-site page cannot send without a preflight the server never
+// grants) and must not name another origin.
+func sameOriginRequest(r *http.Request) bool {
+	if o := r.Header.Get("Origin"); o != "" {
+		u, err := url.Parse(o)
+		if err != nil || u.Host != r.Host {
+			return false
+		}
+	}
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		return true
+	}
+	ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return ct == "application/json"
+}
+
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +99,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /api/job", s.handleJob)
 	mux.HandleFunc("POST /api/finish", s.handleFinish)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isPrivateRemote(r.RemoteAddr) {
+		if !isPrivateRemote(r.RemoteAddr) || !hostAllowed(r.Host) || !sameOriginRequest(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -267,6 +303,13 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFinish(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	running := s.job != nil && !s.job.view(0).Done
+	s.mu.Unlock()
+	if running {
+		writeErr(w, 409, "正在安装")
+		return
+	}
 	writeResp(w, 200, map[string]bool{"ok": true})
 	go func() {
 		time.Sleep(500 * time.Millisecond)

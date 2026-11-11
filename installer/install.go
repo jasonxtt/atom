@@ -154,6 +154,9 @@ func (ins *Installer) runInstall(cfg Config, j *Job) {
 		}
 		return nil
 	}()
+	if err == nil {
+		err = ins.finalize()
+	}
 	if err != nil {
 		j.Logf("安装失败：%v", err)
 		if networkTouched {
@@ -163,20 +166,25 @@ func (ins *Installer) runInstall(cfg Config, j *Job) {
 		j.finish(err, 0)
 		return
 	}
-	st, err := loadState(ins.Paths)
-	if err == nil {
-		st.Complete, st.UpdatedAt = true, time.Now()
-		err = writeJSON(ins.Paths.State(), st)
-	}
-	if err == nil {
-		err = writeJSON(dataMarker(ins.Paths), map[string]string{"version": ins.Version})
-	}
-	if err != nil {
-		j.Logf("记录安装结果失败：%v", err)
-		j.finish(err, 0)
-		return
-	}
 	j.finish(nil, cfg.PanelPort)
+}
+
+// finalize records that the installation is complete: the data marker first, then the state. A failure here
+// is a failure of the installation (the caller rolls the network back), and leaves neither record behind.
+func (ins *Installer) finalize() error {
+	st, err := loadState(ins.Paths)
+	if err != nil {
+		return err
+	}
+	if err := writeJSON(dataMarker(ins.Paths), map[string]string{"version": ins.Version}); err != nil {
+		return fmt.Errorf("记录安装结果失败：%w", err)
+	}
+	st.Complete, st.UpdatedAt = true, time.Now()
+	if err := writeJSON(ins.Paths.State(), st); err != nil {
+		os.Remove(dataMarker(ins.Paths))
+		return fmt.Errorf("记录安装结果失败：%w", err)
+	}
+	return nil
 }
 
 func (ins *Installer) stepDeps(cfg Config, j *Job) error {
@@ -284,7 +292,28 @@ func lookPathOr(name, fallback string) string {
 	return fallback
 }
 
+// routeConflict says whether policy routing table 233 or its rule is already in use by something else; the
+// installer's own rule and route (left by an earlier try) are not a conflict.
+func routeConflict(rules, routes string) string {
+	for _, l := range strings.Split(rules, "\n") {
+		if strings.Contains(l, "lookup "+routeTable) && !strings.Contains(l, "fwmark "+fwmark) {
+			return strings.TrimSpace(l)
+		}
+	}
+	for _, l := range strings.Split(routes, "\n") {
+		if l = strings.TrimSpace(l); l != "" && l != "local default dev lo scope host" {
+			return l
+		}
+	}
+	return ""
+}
+
 func (ins *Installer) stepNetwork(cfg Config, j *Job) error {
+	rules, _ := quietCmd("ip", "rule", "show")
+	routes, _ := quietCmd("ip", "route", "show", "table", routeTable)
+	if c := routeConflict(rules, routes); c != "" {
+		return fmt.Errorf("策略路由表 %s 已经被其他配置使用（%s），安装器不会动它", routeTable, c)
+	}
 	st := &InstallState{Version: ins.Version, InstalledAt: time.Now(), UpdatedAt: time.Now(), Topology: cfg.Topology, LAN: cfg.LAN, WAN: cfg.WAN,
 		PanelPort: cfg.PanelPort, NftBin: lookPathOr("nft", "/usr/sbin/nft"), SysctlBin: lookPathOr("sysctl", "/usr/sbin/sysctl")}
 	ch := loadChanges(ins.Paths)

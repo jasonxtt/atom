@@ -9,10 +9,12 @@
 #   ATOM_MIRRORS  prefixes put before the GitHub address, tried in turn after the direct download
 #   ATOM_REPO     owner/name of the GitHub repository that holds the release
 #   ATOM_PKG      a local package file or a URL to use instead of downloading the release
+#   ATOM_SHA256   the sha256 the package must have (default: the one of this script's version);
+#                 "skip" turns the check off, for a package of your own
 set -euo pipefail
 
 ATOM_VERSION="@VERSION@"
-ATOM_SHA256="@SHA256@"
+ATOM_SHA256="${ATOM_SHA256:-@SHA256@}"
 ATOM_REPO="${ATOM_REPO:-@REPO@}"
 ATOM_MIRRORS="${ATOM_MIRRORS-https://gh-proxy.com/ https://ghfast.top/ https://ghproxy.net/}"
 
@@ -41,6 +43,14 @@ if ! command -v ss >/dev/null; then
   apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 >/dev/null || die "安装 iproute2 失败"
 fi
 
+# an installation that is running in the wizard must not be disturbed
+if systemctl is-active --quiet atom-installer.service && [ -s "$ROOT/run/installer.json" ]; then
+  wport="$(sed -n 's/.*"port": *\([0-9]*\).*/\1/p' "$ROOT/run/installer.json")"
+  if [ -n "$wport" ] && curl -fs --max-time 3 "http://127.0.0.1:${wport}/api/state" | grep -q '"running":true'; then
+    die "安装正在进行，等它完成后再运行"
+  fi
+fi
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 PKGFILE="$TMP/$ASSET"
@@ -50,7 +60,7 @@ fetch() { # url dest: gives up when the connection takes 6s or the speed stays u
 }
 
 verify() {
-  [ -z "$ATOM_SHA256" ] && return 0
+  [ "$ATOM_SHA256" = skip ] && return 0
   [ "$(sha256sum "$1" | cut -d' ' -f1)" = "$ATOM_SHA256" ]
 }
 
@@ -71,23 +81,23 @@ if [ -n "${ATOM_PKG:-}" ]; then
     http://*|https://*) say "下载 $ATOM_PKG"; fetch "$ATOM_PKG" "$PKGFILE" || die "下载失败" ;;
     *) [ -f "$ATOM_PKG" ] || die "找不到 $ATOM_PKG"; cp "$ATOM_PKG" "$PKGFILE" ;;
   esac
+  verify "$PKGFILE" || die "ATOM_PKG 的 sha256 和脚本里的不一致（自己的包请设置 ATOM_SHA256=<sha256> 或 skip）"
 else
   download || die "所有来源都下载失败。可以设置 ATOM_MIRRORS（加速前缀）或 ATOM_PKG（本地包或地址）后重试"
 fi
 
 PKG="$ROOT/pkg"
+systemctl stop atom-installer.service 2>/dev/null || true
 rm -rf "$PKG"
 mkdir -p "$PKG"
 tar -xzf "$PKGFILE" -C "$PKG" --strip-components=1 || die "解包失败"
 [ -x "$PKG/bin/atom-installer" ] || die "包里没有 atom-installer"
 
 if grep -qs '"complete": true' "$ROOT/etc/install.json"; then
-  systemctl stop atom-installer.service 2>/dev/null || true
   say "已安装 atom，升级…"
   exec "$PKG/bin/atom-installer" upgrade --pkg "$PKG"
 fi
 
-systemctl stop atom-installer.service 2>/dev/null || true
 systemctl reset-failed atom-installer.service 2>/dev/null || true
 rm -f "$ROOT/run/installer.json"
 systemd-run --quiet --unit=atom-installer --collect "$PKG/bin/atom-installer" serve --pkg "$PKG" \

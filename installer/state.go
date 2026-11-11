@@ -26,11 +26,18 @@ type InstallState struct {
 // Changes is etc/changes.json: what the installer changed on the system outside /opt/atom (and the unit
 // files), recorded when it happens so that an uninstall can put it back.
 type Changes struct {
-	ResolvedDropIn  bool     `json:"resolved_dropin,omitempty"`
-	ResolvConfLink  string   `json:"resolv_conf_link,omitempty"` // the symlink target /etc/resolv.conf had
-	DisabledUnits   []string `json:"disabled_units,omitempty"`
-	IPForwardBefore string   `json:"ip_forward_before,omitempty"`
-	AptInstalled    []string `json:"apt_installed,omitempty"`
+	ResolvedDropIn  bool        `json:"resolved_dropin,omitempty"`
+	ResolvConfLink  string      `json:"resolv_conf_link,omitempty"` // the symlink target /etc/resolv.conf had
+	DisabledUnits   []UnitState `json:"disabled_units,omitempty"`
+	IPForwardBefore string      `json:"ip_forward_before,omitempty"`
+	AptInstalled    []string    `json:"apt_installed,omitempty"`
+}
+
+// UnitState is a service the installer stopped to free a port, as it was before.
+type UnitState struct {
+	Unit       string `json:"unit"`
+	WasEnabled bool   `json:"was_enabled"`
+	WasActive  bool   `json:"was_active"`
 }
 
 func writeJSON(path string, v any) error {

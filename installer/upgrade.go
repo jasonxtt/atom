@@ -112,29 +112,42 @@ func (ins *Installer) applyUpgrade(st *InstallState, oldSingBox string, log Logg
 	return nil
 }
 
-// backed up: programs, the state and network files, the units, the shipped configuration (not the data).
-func (ins *Installer) backupItems() [][2]string {
+// backupItem is something the upgrade may replace. exact items are put back as they were (a file the new
+// version added is removed); the others are laid over.
+type backupItem struct {
+	path, name string
+	file       bool
+	exact      bool
+}
+
+// backed up: programs, the state and network files, the shipped configuration (not the data), the WebUI.
+func (ins *Installer) backupItems() []backupItem {
 	p := ins.Paths
-	return [][2]string{{filepath.Join(p.Root, "bin"), "bin"}, {filepath.Join(p.Root, "etc"), "etc"}, {filepath.Join(p.Root, "lib"), "lib"},
-		{filepath.Join(p.Data(), "sub_config"), "data/sub_config"}, {filepath.Join(p.Data(), "ui", "main"), "data/ui/main"}}
+	return []backupItem{
+		{path: filepath.Join(p.Root, "bin"), name: "bin"},
+		{path: filepath.Join(p.Root, "etc"), name: "etc"},
+		{path: filepath.Join(p.Root, "lib"), name: "lib"},
+		{path: filepath.Join(p.Data(), "sub_config"), name: "data/sub_config", exact: true},
+		{path: filepath.Join(p.Data(), "ui", "main"), name: "data/ui/main", exact: true},
+		{path: filepath.Join(p.Data(), "config_custom.yaml"), name: "data/config_custom.yaml", file: true},
+		{path: filepath.Join(p.Data(), "rule", "atom_catalog.json"), name: "data/rule/atom_catalog.json", file: true},
+		{path: p.DNSUnit(), name: "units/" + dnsUnitName, file: true},
+		{path: p.SingBoxUnit(), name: "units/" + singBoxUnitName, file: true},
+	}
 }
 
 func (ins *Installer) makeBackup(dir string) error {
-	p := ins.Paths
 	for _, it := range ins.backupItems() {
-		if _, err := os.Stat(it[0]); err != nil {
+		if _, err := os.Stat(it.path); err != nil {
 			continue
 		}
-		if err := copyTree(it[0], filepath.Join(dir, it[1])); err != nil {
-			return err
+		var err error
+		if it.file {
+			err = copyFileAtomic(it.path, filepath.Join(dir, it.name), 0o644)
+		} else {
+			err = copyTree(it.path, filepath.Join(dir, it.name))
 		}
-	}
-	for _, f := range []string{p.DNSUnit(), p.SingBoxUnit(), filepath.Join(p.Data(), "config_custom.yaml")} {
-		rel := "units/" + filepath.Base(f)
-		if strings.HasSuffix(f, "config_custom.yaml") {
-			rel = "data/config_custom.yaml"
-		}
-		if err := copyFileAtomic(f, filepath.Join(dir, rel), 0o644); err != nil {
+		if err != nil {
 			return err
 		}
 	}
@@ -142,26 +155,23 @@ func (ins *Installer) makeBackup(dir string) error {
 }
 
 func (ins *Installer) restoreBackup(dir string, panelPort int, log Logger) error {
-	p := ins.Paths
 	for _, it := range ins.backupItems() {
-		src := filepath.Join(dir, it[1])
+		src := filepath.Join(dir, it.name)
 		if _, err := os.Stat(src); err != nil {
 			continue
 		}
-		if it[1] == "data/ui/main" {
-			os.RemoveAll(it[0])
+		var err error
+		if it.file {
+			err = copyFileAtomic(src, it.path, 0o644)
+		} else {
+			if it.exact {
+				os.RemoveAll(it.path)
+			}
+			err = copyTree(src, it.path)
 		}
-		if err := copyTree(src, it[0]); err != nil {
+		if err != nil {
 			return err
 		}
-	}
-	for _, u := range []string{p.DNSUnit(), p.SingBoxUnit()} {
-		if err := copyFileAtomic(filepath.Join(dir, "units", filepath.Base(u)), u, 0o644); err != nil {
-			return err
-		}
-	}
-	if err := copyFileAtomic(filepath.Join(dir, "data", "config_custom.yaml"), filepath.Join(p.Data(), "config_custom.yaml"), 0o644); err != nil {
-		return err
 	}
 	if err := runCmd(log, 30*time.Second, "systemctl", "daemon-reload"); err != nil {
 		return err

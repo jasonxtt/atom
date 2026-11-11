@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"encoding/json"
+	"io"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -502,5 +504,125 @@ func TestStateJSONHasNoNulls(t *testing.T) {
 		if strings.Contains(string(data), `"`+field+`":null`) {
 			t.Errorf("%s is null: the wizard page calls array methods on it", field)
 		}
+	}
+}
+
+func TestWizardRefusesOtherPagesAndHosts(t *testing.T) {
+	s := newServer(&Installer{Paths: Paths{Root: t.TempDir()}})
+	h := s.handler()
+	host, _ := os.Hostname()
+	do := func(method, target, ctype, origin, hostHeader string) int {
+		var body io.Reader
+		if method == "POST" {
+			body = strings.NewReader("{}")
+		}
+		req := httptest.NewRequest(method, target, body)
+		req.RemoteAddr = "192.168.1.5:4000"
+		if hostHeader != "" {
+			req.Host = hostHeader
+		}
+		if ctype != "" {
+			req.Header.Set("Content-Type", ctype)
+		}
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if c := do("GET", "/api/state", "", "", "192.168.1.9:9996"); c != 200 {
+		t.Errorf("a plain GET by address: %d", c)
+	}
+	if c := do("GET", "/", "", "http://192.168.1.9:9996", "192.168.1.9:9996"); c != 200 {
+		t.Errorf("the page's own origin: %d", c)
+	}
+	if c := do("GET", "/api/state", "", "", "evil.example:9996"); c != 403 {
+		t.Errorf("a rebinding host name: %d", c)
+	}
+	if host != "" {
+		if c := do("GET", "/api/state", "", "", host+":9996"); c != 200 {
+			t.Errorf("this machine's own name: %d", c)
+		}
+	}
+	if c := do("POST", "/api/validate", "text/plain", "", "192.168.1.9:9996"); c != 403 {
+		t.Errorf("a POST that is not JSON (a cross-site form or no-cors fetch): %d", c)
+	}
+	if c := do("POST", "/api/validate", "application/json", "https://evil.example", "192.168.1.9:9996"); c != 403 {
+		t.Errorf("a POST from another origin: %d", c)
+	}
+	if c := do("POST", "/api/validate", "application/json", "http://192.168.1.9:9996", "192.168.1.9:9996"); c != 200 {
+		t.Errorf("the page's own POST: %d", c)
+	}
+}
+
+func TestRouteConflict(t *testing.T) {
+	ours := "9233:\tfrom all fwmark 0x233 lookup 233\n"
+	if c := routeConflict("0:\tfrom all lookup local\n32766:\tfrom all lookup main\n", ""); c != "" {
+		t.Errorf("an empty table is free: %q", c)
+	}
+	if c := routeConflict("0:\tfrom all lookup local\n"+ours, "local default dev lo scope host \n"); c != "" {
+		t.Errorf("what an earlier try left is not a conflict: %q", c)
+	}
+	if c := routeConflict("100:\tfrom 10.9.0.0/16 lookup 233\n", ""); c == "" {
+		t.Error("another rule that uses table 233 is a conflict")
+	}
+	if c := routeConflict("", "default via 10.0.0.1 dev eth1\n"); c == "" {
+		t.Error("another route in table 233 is a conflict")
+	}
+}
+
+func TestFinalize(t *testing.T) {
+	ins := &Installer{Paths: Paths{Root: t.TempDir()}, Version: "0.1.0"}
+	if err := ins.finalize(); err == nil {
+		t.Error("nothing was installed: finalize must fail")
+	}
+	if hasData(ins.Paths) {
+		t.Error("a failed finalize leaves no data marker")
+	}
+	if err := writeJSON(ins.Paths.State(), &InstallState{Version: "0.1.0"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ins.finalize(); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := loadState(ins.Paths)
+	if !st.Complete || !hasData(ins.Paths) {
+		t.Errorf("complete=%v data=%v", st.Complete, hasData(ins.Paths))
+	}
+}
+
+func TestMakeBackupCoversEverythingTheUpgradeOverwrites(t *testing.T) {
+	root := t.TempDir()
+	unitDir := t.TempDir()
+	p := Paths{Root: root, UnitDir: unitDir}
+	ins := &Installer{Paths: p}
+	files := map[string]string{
+		filepath.Join(root, "bin/atomdns"):                  "bin",
+		filepath.Join(root, "etc/install.json"):             "state",
+		filepath.Join(root, "lib/policy-route.sh"):          "route",
+		filepath.Join(root, "data/sub_config/a.yaml"):       "sub",
+		filepath.Join(root, "data/ui/main/index.html"):      "ui",
+		filepath.Join(root, "data/config_custom.yaml"):      "cfg",
+		filepath.Join(root, "data/rule/atom_catalog.json"):  "catalog",
+		filepath.Join(unitDir, dnsUnitName):                 "unit1",
+		filepath.Join(unitDir, singBoxUnitName):             "unit2",
+		filepath.Join(root, "data/webinfo/atom_rules.json"): "user data",
+	}
+	for path, content := range files {
+		os.MkdirAll(filepath.Dir(path), 0o755)
+		os.WriteFile(path, []byte(content), 0o644)
+	}
+	dir := filepath.Join(root, "backup/x")
+	if err := ins.makeBackup(dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"bin/atomdns", "etc/install.json", "lib/policy-route.sh", "data/sub_config/a.yaml", "data/ui/main/index.html", "data/config_custom.yaml", "data/rule/atom_catalog.json", "units/" + dnsUnitName, "units/" + singBoxUnitName} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("%s is not in the backup", name)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "data/webinfo")); err == nil {
+		t.Error("the user's data is not part of the backup")
 	}
 }
