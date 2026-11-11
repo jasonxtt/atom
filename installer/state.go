@@ -26,6 +26,10 @@ type InstallState struct {
 // Changes is etc/changes.json: what the installer changed on the system outside /opt/atom (and the unit
 // files), recorded when it happens so that an uninstall can put it back.
 type Changes struct {
+	// Network is true from the moment the installer starts changing the network (nft tables, policy
+	// routing, ip_forward, the services) until that has been taken back. Only what this says is the installer's
+	// is torn down: a rolled back install leaves nothing a later uninstall may touch.
+	Network         bool        `json:"network,omitempty"`
 	ResolvedDropIn  bool        `json:"resolved_dropin,omitempty"`
 	ResolvConfLink  string      `json:"resolv_conf_link,omitempty"` // the symlink target /etc/resolv.conf had
 	DisabledUnits   []UnitState `json:"disabled_units,omitempty"`

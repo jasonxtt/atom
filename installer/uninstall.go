@@ -8,17 +8,29 @@ import (
 	"time"
 )
 
+// hasRecords: install.json or changes.json is there, so there is something to take back.
+func hasRecords(p Paths) bool {
+	for _, f := range []string{p.State(), p.Changes()} {
+		if _, err := os.Stat(f); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // uninstall takes atom off the machine: services, nft tables, policy routing, ip_forward, what the wizard
 // changed (resolved, stopped services), the units and /opt/atom. The data directory stays unless purge.
 // When something the installer changed cannot be put back, the records and the program stay so that the
 // command can be run again once the cause is fixed.
 func uninstall(p Paths, purge bool, log Logger) error {
 	teardownNetwork(p, log)
-	for _, f := range []string{p.DNSUnit(), p.SingBoxUnit()} {
-		os.Remove(f)
+	if _, err := os.Stat(p.State()); err == nil { // the units are written after install.json
+		for _, f := range []string{p.DNSUnit(), p.SingBoxUnit()} {
+			os.Remove(f)
+		}
+		_ = runCmd(log, 30*time.Second, "systemctl", "daemon-reload")
+		_ = runCmd(log, 30*time.Second, "systemctl", "reset-failed", dnsUnitName, singBoxUnitName)
 	}
-	_ = runCmd(log, 30*time.Second, "systemctl", "daemon-reload")
-	_ = runCmd(log, 30*time.Second, "systemctl", "reset-failed", dnsUnitName, singBoxUnitName)
 
 	ch := loadChanges(p)
 	var failed []string

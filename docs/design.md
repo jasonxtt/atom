@@ -444,13 +444,13 @@ VM 上：TCP 用 redirect，UDP 用 TProxy，只处理目标是 FakeIP 网段和
   3. DNS：国内、国外上游（默认值是产品配置里的，只在和现在的不同时才写）。
   4. sing-box：FakeIP 网段、mixed 端口、可选导入节点（放进"默认代理"组，否则装完国外流量全被拒绝）。
   5. 确认并安装：实时进度，装完自检，倒计时跳转面板。
-- **访问控制 [定]**：安装器不要令牌；默认端口 9996，被占就由系统另选一个空闲端口。只接受私网和回环来源的请求，闲置 30 分钟自动退出，装完 5 分钟内无人使用也退出。
+- **访问控制 [定]**：安装器不要令牌；默认端口 9996，被占就由系统另选一个空闲端口。只接受私网和回环来源的请求，Host 只认 IP、localhost 和本机名，写操作必须是同源的 JSON；闲置 30 分钟自动退出，装完 5 分钟内无人使用也退出。向导只有一个关闭入口（`/api/finish`、闲置计时器、引导脚本都走它）：有安装在跑就拒绝，否则标记 closing，此后不再接受安装和"停用"，然后退出；引导脚本只在收到 200 并且向导单元退出之后才替换包，超时或其他回应一律拒绝并提示手动处理。
 - **装到哪里 [定]**：全部在 `/opt/atom/`：`bin/`（atomdns、sing-box、atom-installer）、`etc/`（nft 规则、`install.json`、`changes.json`）、`lib/policy-route.sh`、`data/`（配置根，atomdns 的 `-d`）、`backup/`。`/opt/atom` 之外只有两个 systemd 单元 `atom-dns.service`、`atom-sing-box.service`，以及用"停用系统 DNS 占用"时写的 resolved drop-in 和 `/etc/resolv.conf` 的链接；`ip_forward` 由 `atom-dns.service` 的 `ExecStartPre` 设置，不写 `/etc/sysctl.d`。`changes.json` 记录安装器改过的系统设置（resolved、停用的服务、`ip_forward` 原值、装过的软件包），卸载按它还原。产品配置里 sing-box 的路径是 `/opt/atom/bin/sing-box`。
 - **安装步骤**：依赖（缺 nftables、iproute2 就 apt 装）→ 程序 → 配置（`data/` 和 `ui/main/`，面板端口写进 `config_custom.yaml` 的 `api.http`）→ 网络（`nft -c` 校验后写 nft 规则、策略路由脚本和两个单元；`atom-dns.service` 的 `ExecStartPre` 依次加载 `atom.nft`、网关形态再加 `atom-gateway.nft` 和 `sysctl -w net.ipv4.ip_forward=1`、`policy-route.sh`，见 deploy-nft.md 第 4 节）→ 启动（有上次留下的 sing-box 配置就先重启 sing-box，再重启 atomdns）→ 设置（调用 atomdns 的 API；失败只警告，面板里可以改）→ 自检（两个服务、端口、`status` 里 sing-box 与配置一致，`www.google.com` 得到 FakeIP、`www.baidu.com` 得到真实 IP；DNS 自检只警告）。
-- **失败**：任何一步失败，撤销网络部分（停服务、删 nft 表、`ip rule`、恢复 `ip_forward`），文件和已做的 53 端口处理保留，页面显示错误和日志，可以返回修改或重试。
+- **失败和所有权**：`changes.json` 里的 `network` 在安装器开始改网络（写 nft 规则、单元、`ip_forward`、策略路由）时置位，撤销或拆除后清除；只有置位时才拆网络（停服务、删 nft 表、`ip rule`、清空表 233、恢复 `ip_forward`），所以回滚过的安装、或别人后来用了表 233，卸载都不会去动。表 233 已被别的配置使用时，安装在改任何东西之前就被拒绝。任何一步失败，撤销网络部分，文件和已做的 53 端口处理保留，页面显示错误和日志，可以返回修改或重试。
 - **重复运行和数据**：向导完成时在 `data/.atom-data` 留一个标记。有标记（卸载时保留了数据）就沿用里面的设置、规则和节点，向导只问环境和网络，DNS 与 sing-box 两步不出现；没有标记（第一次，或上一次没装完）时，向导的值和 atomdns 现在的值比较，不同才写。
 - **升级**：再粘贴同一条命令。已装好（`install.json` 里 `complete`）就由新包里的 `atom-installer upgrade` 做：同版本什么都不做，更旧的拒绝（`--force` 可以）；先备份程序、nft 规则、单元和自带配置到 `backup/`（留最近 3 份），再换程序、覆盖自带配置（`config_custom.yaml`、`sub_config/`、`rule/atom_catalog.json`、`ui/main/`），保留 `webinfo/`、每日更新下载的规则和缓存，重新生成 nft 规则和单元，重启 atom-dns（sing-box 程序变了才重启它）；atomdns 的接口起不来或 sing-box 没有处于最新配置，就恢复备份并等服务恢复。
-- **卸载**：`/opt/atom/bin/atom-installer uninstall [--purge] [--yes]`：停服务，删单元、nft 表、`ip rule`，还原 `ip_forward`、resolved 和被停用的服务，删 `/opt/atom` 下除 `data/` 外的全部文件；`--purge` 连数据一起删。装过的软件包（nftables）不卸载。
+- **卸载**：`/opt/atom/bin/atom-installer uninstall [--purge] [--yes]`：`install.json` 和 `changes.json` 有任一个就能运行（向导里点过"停用"、但安装在写 `install.json` 之前失败时，也能还原那个服务）。按记录还原：网络部分只在 `network` 置位时拆；单元文件只在有 `install.json` 时删；还原 resolved 和被停用的服务（回到原来的启用和运行状态），删 `/opt/atom` 下除 `data/` 外的全部文件；`--purge` 连数据一起删。装过的软件包（nftables）不卸载。
 - **验证（第 7 步，2026-11-12，测试机 `ssh 77`：干净的 Debian 13，2 核 2G，没有 nft，systemd-resolved 占着 53）**：
   - 用 `ATOM_PKG` 加两个假镜像（一个限速、一个正常，GitHub 地址指向不存在的仓库）跑 `install.sh`：慢镜像被丢弃，好镜像下载、sha256 校验通过，起向导。
   - 浏览器里走完整个向导（环境里点"停用系统 DNS 占用"→ 已处理完毕；单网卡旁路由，网卡是接 netns 客户端的 veth，改了国内上游和 mixed 端口，导入一个 socks 节点；`apt` 装上 nftables），自动跳转到 80 端口的面板，概览页正常。

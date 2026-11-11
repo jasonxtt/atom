@@ -133,7 +133,6 @@ func (ins *Installer) runInstall(cfg Config, j *Job) {
 	j.mu.Lock()
 	j.hints = hints
 	j.mu.Unlock()
-	var networkTouched bool
 	err := func() error {
 		steps := []func() error{
 			func() error { return ins.stepDeps(cfg, j) },
@@ -143,7 +142,6 @@ func (ins *Installer) runInstall(cfg Config, j *Job) {
 				if err := ins.checkRouteTable(); err != nil { // nothing has been changed yet: no teardown for a refusal
 					return err
 				}
-				networkTouched = true
 				return ins.stepNetwork(cfg, j)
 			},
 			func() error { return ins.stepStart(cfg, j) },
@@ -165,10 +163,7 @@ func (ins *Installer) runInstall(cfg Config, j *Job) {
 	}
 	if err != nil {
 		j.Logf("安装失败：%v", err)
-		if networkTouched {
-			j.Logf("撤销网络部分")
-			ins.rollbackNetwork(j)
-		}
+		ins.rollbackNetwork(j)
 		j.finish(err, 0)
 		return
 	}
@@ -327,13 +322,14 @@ func (ins *Installer) stepNetwork(cfg Config, j *Job) error {
 	st := &InstallState{Version: ins.Version, InstalledAt: time.Now(), UpdatedAt: time.Now(), Topology: cfg.Topology, LAN: cfg.LAN, WAN: cfg.WAN,
 		PanelPort: cfg.PanelPort, NftBin: lookPathOr("nft", "/usr/sbin/nft"), SysctlBin: lookPathOr("sysctl", "/usr/sbin/sysctl")}
 	ch := loadChanges(ins.Paths)
+	ch.Network = true // from here on the installer owns the network changes, until they are taken back
 	if cfg.Topology == "gateway" && ch.IPForwardBefore == "" {
 		if v, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward"); err == nil {
 			ch.IPForwardBefore = strings.TrimSpace(string(v))
-			if err := saveChanges(ins.Paths, ch); err != nil {
-				return err
-			}
 		}
+	}
+	if err := saveChanges(ins.Paths, ch); err != nil {
+		return err
 	}
 	if err := writeJSON(ins.Paths.State(), st); err != nil {
 		return err
@@ -540,13 +536,19 @@ func lookupVia(server, name string) ([]net.IP, error) {
 	return r.LookupIP(ctx, "ip4", name)
 }
 
-// rollbackNetwork takes the live network changes back; files stay so a retry (or the uninstaller) finds them.
-func (ins *Installer) rollbackNetwork(log Logger) {
-	teardownNetwork(ins.Paths, log)
-}
+// rollbackNetwork takes the live network changes back after a failed installation (files stay, so a retry or
+// the uninstaller finds them). It does nothing when the installer has not changed the network.
+func (ins *Installer) rollbackNetwork(log Logger) { teardownNetwork(ins.Paths, log) }
 
-// teardownNetwork stops the services and removes nft tables, policy routing and ip_forward changes.
+// teardownNetwork stops the services and removes nft tables, policy routing and ip_forward changes, when the
+// record says they are the installer's, and then clears that record.
 func teardownNetwork(p Paths, log Logger) {
+	ch := loadChanges(p)
+	if !ch.Network {
+		log.Logf("网络部分不是安装器装的（或已经撤销），不动")
+		return
+	}
+	log.Logf("撤销网络部分")
 	ignore := func(name string, args ...string) {
 		if err := runCmd(log, 60*time.Second, name, args...); err != nil {
 			log.Logf("  （忽略）%v", err)
@@ -557,9 +559,13 @@ func teardownNetwork(p Paths, log Logger) {
 	ignore("nft", "delete", "table", "ip", "atom_nat")
 	ignore("ip", "rule", "del", "fwmark", fwmark, "lookup", routeTable, "priority", routePriority)
 	ignore("ip", "route", "flush", "table", routeTable)
-	if ch := loadChanges(p); ch.IPForwardBefore != "" {
+	if ch.IPForwardBefore != "" {
 		if err := os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte(ch.IPForwardBefore), 0o644); err != nil {
 			log.Logf("  （忽略）恢复 ip_forward: %v", err)
 		}
+	}
+	ch.Network, ch.IPForwardBefore = false, ""
+	if err := saveChanges(p, ch); err != nil {
+		log.Logf("记录保存失败：%v", err)
 	}
 }

@@ -319,17 +319,26 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 	writeResp(w, 200, job.view(since))
 }
 
-func (s *Server) handleFinish(w http.ResponseWriter, r *http.Request) {
+// requestClose is the one way the wizard ends, for the finish request (the page and the bootstrap script) and
+// the idle timer alike: refused while an installation runs; otherwise the wizard is marked closing, after
+// which no installation or free action is accepted.
+func (s *Server) requestClose() bool {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.job != nil && !s.job.view(0).Done {
-		s.mu.Unlock()
+		return false
+	}
+	s.closing = true
+	return true
+}
+
+func (s *Server) handleFinish(w http.ResponseWriter, r *http.Request) {
+	if !s.requestClose() {
 		writeErr(w, 409, "正在安装")
 		return
 	}
-	s.closing = true
-	s.mu.Unlock()
 	writeResp(w, 200, map[string]bool{"ok": true})
 	go func() {
 		time.Sleep(500 * time.Millisecond)
@@ -352,7 +361,28 @@ func (s *Server) stop(cleanup bool) {
 	})
 }
 
-// watchIdle ends the wizard when nobody uses it any more.
+// idleClose ends the wizard when nobody uses it any more: after the idle limit, or the shorter one once an
+// installation has finished. It reports whether it did.
+func (s *Server) idleClose() bool {
+	s.mu.Lock()
+	idle := time.Since(s.seen)
+	var done, ok bool
+	if s.job != nil {
+		v := s.job.view(0)
+		done, ok = v.Done, v.OK
+	}
+	running := s.job != nil && !done
+	s.mu.Unlock()
+	if running || !(idle > idleLimit || (done && ok && idle > afterDoneLimit)) {
+		return false
+	}
+	if !s.requestClose() { // an installation started in the meantime
+		return false
+	}
+	s.stop(done && ok)
+	return true
+}
+
 func (s *Server) watchIdle() {
 	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
@@ -361,20 +391,7 @@ func (s *Server) watchIdle() {
 		case <-s.quit:
 			return
 		case <-t.C:
-			s.mu.Lock()
-			idle := time.Since(s.seen)
-			var done, ok bool
-			if s.job != nil {
-				v := s.job.view(0)
-				done, ok = v.Done, v.OK
-			}
-			running := s.job != nil && !done
-			s.mu.Unlock()
-			switch {
-			case running:
-			case done && ok && idle > afterDoneLimit, idle > idleLimit:
-				s.stop(done && ok)
-			}
+			s.idleClose()
 		}
 	}
 }

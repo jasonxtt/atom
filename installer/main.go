@@ -183,8 +183,8 @@ func cmdUninstall(args []string) int {
 	yes := fs.Bool("yes", false, "do not ask")
 	fs.Parse(args)
 	p := defaultPaths()
-	if _, err := loadState(p); err != nil {
-		fmt.Fprintln(os.Stderr, "没有找到安装记录", p.State())
+	if !hasRecords(p) {
+		fmt.Fprintln(os.Stderr, "没有找到安装记录", p.State(), p.Changes())
 		return 1
 	}
 	if !*yes {

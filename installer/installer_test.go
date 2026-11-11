@@ -4,12 +4,14 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRenderNft(t *testing.T) {
@@ -655,5 +657,124 @@ func TestFinishAndInstallDoNotRace(t *testing.T) {
 	}
 	if c := post("/api/free"); c != 409 {
 		t.Errorf("a free action after finish was accepted: %d", c)
+	}
+}
+
+type recLogger struct{ lines []string }
+
+func (r *recLogger) Logf(format string, args ...any) {
+	r.lines = append(r.lines, fmt.Sprintf(format, args...))
+}
+
+func (r *recLogger) ran(sub string) bool {
+	for _, l := range r.lines {
+		if strings.HasPrefix(l, "$ ") && strings.Contains(l, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestUninstallFollowsTheOwnershipRecord(t *testing.T) {
+	newPaths := func() Paths { return Paths{Root: t.TempDir(), UnitDir: t.TempDir()} }
+
+	// the network part was rolled back (or never installed): table 233 and the nft tables are not touched
+	p := newPaths()
+	if err := writeJSON(p.State(), &InstallState{Version: "0.1.0"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveChanges(p, &Changes{Network: false}); err != nil {
+		t.Fatal(err)
+	}
+	log := &recLogger{}
+	if err := uninstall(p, false, log); err != nil {
+		t.Fatal(err)
+	}
+	for _, sub := range []string{"nft", "ip route flush", "ip rule", "disable --now"} {
+		if log.ran(sub) {
+			t.Errorf("a rolled back install must not run %q on uninstall: %v", sub, log.lines)
+		}
+	}
+
+	// the network part is the installer's: it is torn down, and then no longer claimed
+	p = newPaths()
+	writeJSON(p.State(), &InstallState{Version: "0.1.0"})
+	saveChanges(p, &Changes{Network: true})
+	log = &recLogger{}
+	uninstall(p, true, log)
+	for _, sub := range []string{"nft delete table inet atom", "ip route flush table 233", "ip rule del fwmark 0x233"} {
+		if !log.ran(sub) {
+			t.Errorf("an owned network must be torn down with %q: %v", sub, log.lines)
+		}
+	}
+
+	// only changes.json (a service was stopped, the install never got to write install.json): nothing of the
+	// network is touched and the service is restored
+	p = newPaths()
+	saveChanges(p, &Changes{DisabledUnits: []UnitState{{Unit: "x-test.service"}}})
+	if !hasRecords(p) {
+		t.Fatal("changes.json alone is a record")
+	}
+	log = &recLogger{}
+	if err := uninstall(p, false, log); err != nil {
+		t.Fatal(err)
+	}
+	if log.ran("nft") || log.ran("ip route") || log.ran("daemon-reload") {
+		t.Errorf("without install.json the network and the units are left alone: %v", log.lines)
+	}
+	if hasRecords(newPaths()) {
+		t.Error("no records, no uninstall")
+	}
+}
+
+func TestTeardownClearsOwnership(t *testing.T) {
+	p := Paths{Root: t.TempDir()}
+	saveChanges(p, &Changes{Network: true, IPForwardBefore: ""})
+	teardownNetwork(p, &recLogger{})
+	if loadChanges(p).Network {
+		t.Error("after a teardown the network is no longer the installer's")
+	}
+	log := &recLogger{}
+	teardownNetwork(p, log) // a second teardown must not touch anything
+	if log.ran("nft") || log.ran("ip ") {
+		t.Errorf("%v", log.lines)
+	}
+}
+
+func TestOneWayToClose(t *testing.T) {
+	s := newServer(&Installer{Paths: Paths{Root: t.TempDir()}})
+	s.job = newJob([]string{"a"})
+	if s.requestClose() {
+		t.Error("a running installation refuses to close")
+	}
+	s.mu.Lock()
+	s.seen = time.Now().Add(-2 * idleLimit)
+	s.mu.Unlock()
+	if s.idleClose() {
+		t.Error("the idle timer must not end a running installation")
+	}
+	s.job.finish(nil, 80)
+	s.mu.Lock()
+	s.seen = time.Now().Add(-2 * afterDoneLimit)
+	s.mu.Unlock()
+	if !s.idleClose() {
+		t.Error("a finished installation that nobody uses closes")
+	}
+	if !s.closing {
+		t.Error("closing must be set before the wizard exits")
+	}
+	if !s.busyOrClosing() {
+		t.Error("nothing is accepted once closing")
+	}
+
+	s2 := newServer(&Installer{Paths: Paths{Root: t.TempDir()}})
+	if s2.idleClose() {
+		t.Error("a wizard that was just used does not close")
+	}
+	s2.mu.Lock()
+	s2.seen = time.Now().Add(-2 * idleLimit)
+	s2.mu.Unlock()
+	if !s2.idleClose() {
+		t.Error("an unused wizard closes after the idle limit")
 	}
 }

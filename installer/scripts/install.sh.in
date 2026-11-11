@@ -43,22 +43,25 @@ if ! command -v ss >/dev/null; then
   apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 >/dev/null || die "安装 iproute2 失败"
 fi
 
-# An earlier wizard is asked to close (it refuses while an installation is running, and takes no new one after
-# it agreed), then waited for. Only a wizard that does not answer at all is stopped.
+# An earlier wizard is asked to close and has to agree (it refuses while an installation is running, and
+# takes no new one once it agreed); the package is replaced only after it answered 200 and its unit has exited.
+# No answer, any other answer, or a unit that does not exit: nothing is touched, the wizard is left to the user.
 stop_wizard() {
   local wport code
-  if systemctl is-active --quiet atom-installer.service; then
-    wport="$(sed -n 's/.*"port": *\([0-9]*\).*/\1/p' "$ROOT/run/installer.json" 2>/dev/null || true)"
-    if [ -n "$wport" ]; then
-      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:${wport}/api/finish" || true)"
-      [ "$code" = 409 ] && die "安装正在进行，等它完成后再运行"
-    fi
-    for _ in $(seq 1 20); do
-      systemctl is-active --quiet atom-installer.service || break
-      sleep 0.5
-    done
-    systemctl stop atom-installer.service 2>/dev/null || true
-  fi
+  systemctl is-active --quiet atom-installer.service || return 0
+  wport="$(sed -n 's/.*"port": *\([0-9]*\).*/\1/p' "$ROOT/run/installer.json" 2>/dev/null || true)"
+  [ -n "$wport" ] || die "安装器单元在运行但找不到它的端口。确认没有安装在进行后执行：systemctl stop atom-installer"
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:${wport}/api/finish" || true)"
+  case "$code" in
+    200) ;;
+    409) die "安装正在进行，等它完成后再运行" ;;
+    *) die "安装器没有答应关闭（回应：${code:-无}）。确认没有安装在进行后执行：systemctl stop atom-installer，再重新运行" ;;
+  esac
+  for _ in $(seq 1 30); do
+    systemctl is-active --quiet atom-installer.service || return 0
+    sleep 0.5
+  done
+  die "安装器答应关闭但没有退出。确认没有安装在进行后执行：systemctl stop atom-installer，再重新运行"
 }
 
 TMP="$(mktemp -d)"
