@@ -121,13 +121,13 @@ Rule {
 
 "类"的划分（第 2 步实现时定下）：`domain`、`suffix`、`keyword`、`regex`、`ruleset` 都是域名条件，算同一类；`client` 是第二类；IP 部分（`ip_cidr`、`ip_ruleset`）由 sing-box 匹配（4.6）。所以"domain a.com，ruleset 广告"表示 a.com 或广告域名。只有 `client` 条件的规则匹配这个客户端的所有域名。规则至少要有一个条件。
 
-端口和网络条件（2026-11-12，用户定）**[定]**：`port`、`port_range`、`network` 和 IP 部分一起编成 sing-box 路由规则，语义同 sing-box 无头规则：不同字段之间是"且"，同一字段的多个值是"或"（所以"IP 网段 A 或 B，且 TCP 端口 443"）。DNS 查询时不知道端口，所以带端口或网络条件的规则不能再带域名类条件或客户端条件（400）；动作可以是代理、直连、屏蔽。它们只管真实 IP 的连接（方案 A）：FakeIP 连接在 sing-box 里按绑定或 Final 走，不经过路由规则（3.3）。
+端口和网络条件（2026-11-12，用户定）**[定]**：`port`、`port_range`、`network` 和 IP 部分一起编成 sing-box 路由规则，语义同 sing-box 无头规则：目标端口（`port` 和 `port_range` 算一类）、网络、IP 部分之间是"且"，每一类里的多个值是"或"（所以"IP 网段 A 或 B，且 TCP，且端口 443 或 8000-9000"）。DNS 查询时不知道端口，所以带端口或网络条件的规则不能再带域名类条件或客户端条件（400）；动作可以是代理、直连、屏蔽。它们只管真实 IP 的连接（方案 A）：FakeIP 连接在 sing-box 里按绑定或 Final 走，不经过路由规则（3.3）。
 
 所以一条规则里，域名类条件之间是"或"；客户端和域名类之间是"且"；IP 部分和域名类之间按同一动作分别在 sing-box 和 AtomDNS 里匹配，效果上是"或"；端口、网络和 IP 部分之间是"且"。规则编辑页按这个关系在条件块之间标小字"或""且"（块按 域名类、IP 部分、端口、网络、客户端 的顺序显示）。
 
 界面的叫法（2026-11-12，用户定）：规则编辑页的条件分"内置规则集"（MetaCubeX、blackmatrix7 目录，原来叫"规则源"）、"自定义规则集"和"自定义条件"（域名、目标 IP 网段、目标端口、网络、客户端，原来叫"匹配器"）；规则集页原来叫"内置"的 `cuscn`、`cusnocn`、`adguard`、`geosite_cn` 等叫"默认规则集"。
 
-粘贴 sing-box 规则（2026-11-12）：规则编辑页可以粘贴一条 sing-box 无头规则 JSON，按字段拆进条件：`domain`、`domain_suffix`、`domain_keyword`、`domain_regex` 进域名条件（`domain_suffix` 开头的点去掉，所以也匹配这个域名本身），`ip_cidr`、`port`、`port_range`、`network` 进对应条件，`source_ip_cidr` 进客户端条件。其他字段（`rule_set`、`protocol`、`process_*`、`invert`、需要嗅探的字段等）直接报错，不静默忽略。在前端拆（`webui/src/singboxRule.ts`），接口不变：拆出来的条件照常保存、照常由后端校验。不开嗅探，不加需要嗅探的条件。
+粘贴 sing-box 规则（2026-11-12）：规则编辑页可以粘贴一条 sing-box 无头规则 JSON，按字段拆进条件：`domain`、`domain_suffix`、`domain_keyword`、`domain_regex` 进域名条件（`domain_suffix` 以点开头的条目只匹配子域名，这里表示不了，报错；值里有换行等控制字符也报错，因为表单按行拆条目；已经有客户端条件时再粘贴 `source_ip_cidr` 报错，一条规则只有一块客户端条件），`ip_cidr`、`port`、`port_range`、`network` 进对应条件，`source_ip_cidr` 进客户端条件。其他字段（`rule_set`、`protocol`、`process_*`、`invert`、需要嗅探的字段等）直接报错，不静默忽略。在前端拆（`webui/src/singboxRule.ts`），接口不变：拆出来的条件照常保存、照常由后端校验。不开嗅探，不加需要嗅探的条件。
 
 客户端条件取反（第 6 步，用户定的）**[定]**：`match.client_invert` 为 true 时，"客户端不在 `client` 列表内"才算命中。只能和 `client` 一起用，单独给返回 400；和域名条件之间仍然是"与"；动作仍然只能是直连或屏蔽。一条规则一个动作，不命中就继续往下匹配；不做"全部代理"。AtomDNS 原来的两种客户端分流模式用规则写：
 
@@ -224,7 +224,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 - AtomDNS 的 DNS 匹配跳过它们（`rules/test` 也不会命中）。启用的 IP 规则按规则表里的顺序编译成 sing-box 路由规则，排在 mixed 入站的 `resolve` 之后：代理 → `route` 到组，直连 → `route` 到 `direct`，屏蔽 → `reject`。网段写回规范形式（主机位清零）。
 - 改动规则时，如果启用的 IP 规则（网段、动作、顺序）有变化，就走一遍 sing-box 应用事务（第 6 节），应用失败时规则的改动也不保存。只改域名规则不碰 sing-box。
 - nft 部分（第 4 步实现，2026-11-12 改，见 9.4）：nft 把从 LAN 网卡进来、目标不是本机的 IPv4 TCP、UDP 全部导进 sing-box，不再按网段挑选，atomdns 也不再维护 nft 集合（`GET status` 去掉了 `nft`）。主路由只把 FakeIP 网段和要代理的网段转给这台机器，所以 IP 规则的网段要在主路由上转过来，否则只对 7890 有效。IPv6 的 IP 规则只对 7890 入站有效。
-- 端口、网络条件和 FakeIP（2026-11-12）**[定]**：路由规则只管真实 IP 的连接。生成的每条规则都是 `logical and`：`{ip_cidr: [FakeIP 网段], invert: true}` 加上规则自己的条件（`ip_cidr`、`port`、`port_range`、`network`），作为保险把 FakeIP 网段排除在外（补丁已经让 FakeIP 连接在路由规则之前按绑定或 Final 走）。`ip_cidr` 条目和 FakeIP 网段重叠的拒绝保存（400），改 FakeIP 网段时和已有的 `ip_cidr` 条目重叠也拒绝；原来没有这项校验。规则集里的网段（`ip_ruleset`）不校验，靠上面的排除。只有端口或网络条件、没有 IP 部分的规则匹配所有真实 IP；IP 部分来自规则集、但规则集还没有网段时，这条规则不产生 sing-box 规则（否则会放宽成所有 IP）；删除规则集后只剩端口或网络条件的规则一起删除。
+- 端口、网络条件和 FakeIP（2026-11-12）**[定]**：路由规则只管真实 IP 的连接。生成的每条规则都是 `logical and`：`{ip_cidr: [FakeIP 网段], invert: true}` 加上规则自己的条件（`ip_cidr`、`port`、`port_range`、`network`），作为保险把 FakeIP 网段排除在外（补丁已经让 FakeIP 连接在路由规则之前按绑定或 Final 走）。新增或改动的规则里 `ip_cidr` 条目和 FakeIP 网段重叠的拒绝保存（400），改 FakeIP 网段时和任何已有的 `ip_cidr` 条目重叠也拒绝；原来没有这项校验。只在写入时查，加载时不查（codex 复审后改）：以前存下的重叠规则照常加载（生成时反正排除了 FakeIP 网段），不会让程序起不来。规则集里的网段（`ip_ruleset`）不校验，靠上面的排除。只有端口或网络条件、没有 IP 部分的规则匹配所有真实 IP；IP 部分来自规则集、但规则集还没有网段时，这条规则不产生 sing-box 规则（否则会放宽成所有 IP）；删除规则集后只剩端口或网络条件的规则一起删除。
 - 没被任何规则命中的真实 IP 连接走 `route.final`（Final）：到达这台机器的转发流量都是主路由转过来、要代理的（9.1）。
 - 没有配置 `singbox` 段时（比如测试配置），`ip_cidr` 规则仍然返回 400。
 
