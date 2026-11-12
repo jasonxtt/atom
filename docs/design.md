@@ -438,9 +438,11 @@ VM 上：TCP 用 redirect，UDP 用 TProxy，只处理目标是 FakeIP 网段和
 
 - **三层**：用户粘贴 `curl -fsSL <地址>/install.sh | sudo bash`；脚本装好 `atom-installer`（Go 标准库写的单个静态程序，向导页面内嵌）并打印"请在浏览器打开 http://<IP>:<端口>/"；浏览器里配好 DNS 和 sing-box 的基础设置，确定后自动跳转到面板。装完安装器自己退出。
 - **下载**（脚本）：配套包 `atom-<版本>-linux-amd64.tar.gz`（一个包：atomdns、补丁版 sing-box、`atom-installer`、`atom-webui.tar.gz`、默认配置、`manifest.json`），来源按顺序试：GitHub Release 直连，然后加速前缀（`gh-proxy.com`、`ghfast.top`、`ghproxy.net`，可用 `ATOM_MIRRORS` 改）。连接 6 秒没通，或速度低于 50 KB/s 持续 10 秒，就换下一个。包的 sha256 在发版时写进 `install.sh`，任何来源下载的都要校验，不过就丢弃换下一个（加速源是第三方）。`ATOM_PKG` 可以指定本地包或地址（开发和离线用）。第 7 步没有发布 Release：下载路径用本地模拟的"GitHub 不通、慢镜像、好镜像"验证过，没有真实访问过 GitHub 上的包；公共加速源的可用性会变（2026-11-11 探测：`gh-proxy.com`、`ghfast.top` 通，`ghproxy.net` 超时，`mirror.ghproxy.com` 连不上），上线前要再核。
-- **向导**（`web/index.html`，只放标签、错误和两处必须的提示：网关形态的警告，完成页的主路由/DHCP 设置）：
+- **向导**（`web/index.html`，只放标签、错误和两处必须的提示：网关形态的警告，完成页的两步：主路由加静态路由 FakeIP 网段 → LAN IP、客户端 DNS 设为 LAN IP，两种拓扑一样）：
   1. 环境：系统（Debian 12+、Ubuntu 22.04+、x86_64、systemd、root）；53 端口被占时列出占用者并给按钮：systemd-resolved 的 stub 写 drop-in 关掉并把 `/etc/resolv.conf` 指到上游列表，其他 systemd 服务停止并禁用，不是服务的只提示；做完显示"已处理完毕"。
   2. 网络：单网卡旁路由或双网卡网关，选网卡；选网关必须勾选"LAN 全部流量经过本机"；面板端口，默认 **80**。
+     - 双网卡网关另有"LAN 侧网关"和"客户端网段"（2026-11-12，用户在 atom 测试机上发现）：客户端不在 LAN 网段、经 LAN 侧的路由器过来时，本机的应答（DNS、redirect 和 TProxy 的回包、NAT 回来的包）会沿默认路由从 WAN 出去。向导按本机已有的、经 LAN 网卡的路由预填这两项；安装器在 `policy-route.sh` 里对每个网段写 `ip route replace <网段> via <LAN 侧网关> dev <LAN 网卡>`，随 `atom-dns.service` 每次启动加回。没用连接标记改道：atomdns 的 UDP 监听在通配地址、按路由选源地址，改道改不了已经选成 WAN 地址的源，DNS 仍然不通。都留空表示客户端都在 LAN 网段。
+     - 所有权：网段原来就有同一网关、同一网卡的路由，就算机器自己的，卸载不删；网关不同就拒绝安装。安装器加的记在 `changes.json` 的 `routes`，拆网络时只删这些；重装时不再需要的旧路由当场删掉。
   3. DNS：国内、国外上游（默认值是产品配置里的，只在和现在的不同时才写）。
   4. sing-box：FakeIP 网段、mixed 端口、可选导入节点（放进"默认代理"组，否则装完国外流量全被拒绝）。
   5. 确认并安装：实时进度，装完自检，倒计时跳转面板。
