@@ -257,7 +257,7 @@ func (ins *Installer) writeNetworkFiles(st *InstallState, log Logger) error {
 		return err
 	}
 	if st.Topology == "gateway" {
-		gw, err := renderGatewayNft(st.LAN, st.WAN)
+		gw, err := renderGatewayNft(st.LAN, st.WAN, st.PanelPort)
 		if err != nil {
 			return err
 		}

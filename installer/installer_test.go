@@ -34,14 +34,17 @@ func TestRenderNft(t *testing.T) {
 }
 
 func TestRenderGatewayNft(t *testing.T) {
-	got, err := renderGatewayNft([]string{"ens34"}, "ens33")
+	got, err := renderGatewayNft([]string{"ens34"}, "ens33", 80)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(got, `iifname { "ens34" } oifname "ens33" masquerade`) {
 		t.Errorf("unexpected NAT rule:\n%s", got)
 	}
-	if _, err := renderGatewayNft([]string{"ens34"}, `a" b`); err == nil {
+	if !strings.Contains(got, `iifname "ens33" tcp dport 80 drop`) {
+		t.Errorf("the panel must be closed on the WAN:\n%s", got)
+	}
+	if _, err := renderGatewayNft([]string{"ens34"}, `a" b`, 80); err == nil {
 		t.Error("a bad WAN name must be refused")
 	}
 }

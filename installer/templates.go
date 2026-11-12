@@ -62,10 +62,15 @@ table inet atom {
 `, l, fwmark), nil
 }
 
-// renderGatewayNft is deploy-nft.md 3.2: everything else from the LAN is NATed out of the WAN.
-func renderGatewayNft(lan []string, wan string) (string, error) {
+// renderGatewayNft is deploy-nft.md 3.2: everything else from the LAN is NATed out of the WAN. The panel is
+// for the LAN only: its port is closed on the WAN (atomdns still listens on every address, so the installer
+// reaches it on 127.0.0.1 and a changed LAN address does not matter).
+func renderGatewayNft(lan []string, wan string, panelPort int) (string, error) {
 	if err := checkIfaceNames(append(append([]string{}, lan...), wan)); err != nil {
 		return "", err
+	}
+	if panelPort < 1 || panelPort > 65535 {
+		return "", fmt.Errorf("invalid panel port %d", panelPort)
 	}
 	return fmt.Sprintf(`#!/usr/sbin/nft -f
 # atom, dual-NIC gateway only: everything else from the LAN is forwarded and NATed out of the WAN. Written by atom-installer.
@@ -74,10 +79,16 @@ delete table ip atom_nat
 table ip atom_nat {
 	chain postrouting {
 		type nat hook postrouting priority srcnat; policy accept;
-		iifname { %s } oifname "%s" masquerade
+		iifname { %[1]s } oifname "%[2]s" masquerade
+	}
+
+	# The panel is not reachable from the WAN.
+	chain input {
+		type filter hook input priority filter; policy accept;
+		iifname "%[2]s" tcp dport %[3]d drop
 	}
 }
-`, nftList(lan), wan), nil
+`, nftList(lan), wan, panelPort), nil
 }
 
 func checkIfaceNames(names []string) error {

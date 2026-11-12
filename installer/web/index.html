@@ -442,7 +442,9 @@ function valChip(v) { return `<span class="val">${esc(v)}<button type="button" d
 
 function viewDone() {
   const h0 = S.job.hints, ip = h0.lan_ip, port = S.job.panel_port;
-  const url = `http://${location.hostname}${port === 80 ? '' : ':' + port}/`;
+  // a gateway's panel is closed on the WAN: send the browser to the LAN address
+  const host = h0.topology === 'gateway' && ip ? ip : location.hostname;
+  const url = `http://${host}${port === 80 ? '' : ':' + port}/`;
   S.panelURL = url;
   let h = `<div class="hero"><div class="big">${I.ok}</div><h1>安装完成</h1><div class="url">${esc(url)}</div></div>`;
   h += '<div class="sec"><div class="lbl">接下来</div><div class="todo">';
