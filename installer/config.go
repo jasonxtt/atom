@@ -12,6 +12,8 @@ type Config struct {
 	LAN           []string `json:"lan"`
 	WAN           string   `json:"wan"`
 	AcceptGateway bool     `json:"accept_gateway"`
+	LANGateway    string   `json:"lan_gateway"` // gateway only: the router on the LAN side, for clients not on the LAN
+	ClientNets    string   `json:"client_nets"` // gateway only: those clients' networks, one per line
 	PanelPort     int      `json:"panel_port"`
 	Domestic      string   `json:"domestic"` // upstream lines
 	Foreign       string   `json:"foreign"`
@@ -91,6 +93,10 @@ func (c *Config) Validate(ifaces []Iface, installerPort int, busy func(port int)
 	}
 	if c.Topology == "gateway" && c.WAN != "" && !have[c.WAN] {
 		add("wan", "没有网卡 %s", c.WAN)
+	}
+	if c.Topology == "gateway" {
+		_, rerrs := clientRoutes(c.LAN, c.LANGateway, c.ClientNets, c.FakeIPRange, ifaces)
+		errs = append(errs, rerrs...)
 	}
 
 	portOK := func(field string, port int) bool {
@@ -213,4 +219,110 @@ func nodeFormat(s string) string {
 		return "yaml"
 	}
 	return "link"
+}
+
+// ClientRoute is a route the dual-NIC gateway needs to answer clients that are not on the LAN itself: their
+// network via the router on the LAN side. Without it the answers (DNS, and what sing-box sends back) follow
+// the default route out of the WAN.
+type ClientRoute struct {
+	Net string `json:"net"`
+	Via string `json:"via"`
+	Dev string `json:"dev"`
+}
+
+// clientRoutes checks the LAN gateway and the client networks of the wizard and turns them into routes. Both
+// empty is fine: the clients are on the LAN.
+func clientRoutes(lan []string, gwText, netsText, fakeip string, ifaces []Iface) ([]ClientRoute, []FieldError) {
+	var errs []FieldError
+	add := func(field, format string, a ...any) {
+		errs = append(errs, FieldError{field, fmt.Sprintf(format, a...)})
+	}
+	gwText = strings.TrimSpace(gwText)
+	lines := strings.Fields(normalizeLines(netsText))
+	if gwText == "" && len(lines) == 0 {
+		return nil, nil
+	}
+	// the LAN networks the machine is on
+	type onLink struct {
+		dev string
+		net *net.IPNet
+	}
+	var links []onLink
+	isLAN := map[string]bool{}
+	for _, n := range lan {
+		isLAN[n] = true
+	}
+	for _, i := range ifaces {
+		if !isLAN[i.Name] {
+			continue
+		}
+		for _, a := range i.Addrs {
+			if _, n, err := net.ParseCIDR(a); err == nil && n.IP.To4() != nil {
+				links = append(links, onLink{i.Name, n})
+			}
+		}
+	}
+	dev := ""
+	gw := net.ParseIP(gwText)
+	switch {
+	case gwText == "":
+		add("lan_gateway", "填写 LAN 侧网关")
+	case gw == nil || gw.To4() == nil:
+		add("lan_gateway", "需要 IPv4 地址")
+	default:
+		for _, l := range links {
+			if l.net.Contains(gw) {
+				dev = l.dev
+				break
+			}
+		}
+		if dev == "" {
+			add("lan_gateway", "%s 不在 LAN 网卡的网段内", gwText)
+		}
+	}
+	if len(lines) == 0 {
+		add("client_nets", "填写客户端网段，或清空网关")
+	}
+	_, fake, _ := net.ParseCIDR(strings.TrimSpace(fakeip))
+	var out []ClientRoute
+	seen := map[string]bool{}
+	for _, l := range lines {
+		ip, n, err := net.ParseCIDR(l)
+		if err != nil || ip.To4() == nil {
+			add("client_nets", "%s：需要 IPv4 网段，例如 10.0.0.0/24", l)
+			continue
+		}
+		ones, _ := n.Mask.Size()
+		if ones == 0 {
+			add("client_nets", "%s：不能是默认路由", l)
+			continue
+		}
+		if !ip.Equal(n.IP) {
+			add("client_nets", "%s：主机位必须为 0（应为 %s）", l, n)
+			continue
+		}
+		direct := false
+		for _, k := range links {
+			if k.net.Contains(n.IP) {
+				direct = true
+			}
+		}
+		if direct {
+			add("client_nets", "%s：和 LAN 在同一网段，不用填", l)
+			continue
+		}
+		if fake != nil && (fake.Contains(n.IP) || n.Contains(fake.IP)) {
+			add("client_nets", "%s：和 FakeIP 网段重叠", l)
+			continue
+		}
+		if seen[n.String()] {
+			continue
+		}
+		seen[n.String()] = true
+		out = append(out, ClientRoute{Net: n.String(), Via: gwText, Dev: dev})
+	}
+	if len(errs) > 0 {
+		return nil, errs
+	}
+	return out, nil
 }

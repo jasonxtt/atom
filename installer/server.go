@@ -133,14 +133,15 @@ type defaults struct {
 }
 
 type stateResp struct {
-	Version       string     `json:"version"`
-	System        SystemInfo `json:"system"`
-	Ifaces        []Iface    `json:"ifaces"`
-	Addrs         []string   `json:"addrs"`
-	Port53        []Occupant `json:"port53"`
-	ScanError     string     `json:"scan_error,omitempty"`
-	Defaults      defaults   `json:"defaults"`
-	InstallerPort int        `json:"installer_port"`
+	Version       string        `json:"version"`
+	System        SystemInfo    `json:"system"`
+	Ifaces        []Iface       `json:"ifaces"`
+	Routes        []ClientRoute `json:"routes"` // routes via a gateway the machine has: the wizard fills the LAN side from them
+	Addrs         []string      `json:"addrs"`
+	Port53        []Occupant    `json:"port53"`
+	ScanError     string        `json:"scan_error,omitempty"`
+	Defaults      defaults      `json:"defaults"`
+	InstallerPort int           `json:"installer_port"`
 	Installed     *struct {
 		Version   string `json:"version"`
 		PanelPort int    `json:"panel_port"`
@@ -158,6 +159,8 @@ func (s *Server) state() stateResp {
 	if r.Addrs == nil {
 		r.Addrs = []string{}
 	}
+	out, _ := quietCmd("ip", "-4", "route", "show")
+	r.Routes = parseViaRoutes(out)
 	if occ, err := portOccupants(53); err != nil {
 		r.ScanError = err.Error()
 		r.System.Problems = append(r.System.Problems, "需要 ss 命令（iproute2）来检查端口")

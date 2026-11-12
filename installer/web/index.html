@@ -144,6 +144,8 @@ textarea.inp{font-family:var(--mono);font-size:12.5px;line-height:1.6;min-height
 .if .tk svg{width:11px;height:11px}
 .side{--c:var(--lan);--c-soft:var(--lan-soft);display:flex;flex-direction:column;gap:10px;padding:14px;border-radius:18px;background:var(--fill);border-top:3px solid var(--c)}
 .side.wan{--c:var(--wan);--c-soft:var(--wan-soft)}
+.side .rt{display:flex;flex-direction:column;gap:12px;padding-top:12px;margin-top:2px;border-top:1px solid var(--line)}
+.side .rt textarea.inp{min-height:76px}
 .side .sh{display:flex;align-items:center;gap:10px}
 .side .sh .ic{width:30px;height:30px;border-radius:10px;background:var(--c-soft);color:var(--c);display:grid;place-items:center;flex:none}
 .side .sh .ic svg{width:17px;height:17px}
@@ -275,7 +277,7 @@ const ART = {
   </svg>`,
 };
 
-const FIELD_STEP = { topology: 'net', lan: 'net', wan: 'net', accept_gateway: 'net', panel_port: 'net', domestic: 'dns', foreign: 'dns', fakeip_range: 'sb', mixed_port: 'sb' };
+const FIELD_STEP = { topology: 'net', lan: 'net', wan: 'net', accept_gateway: 'net', lan_gateway: 'net', client_nets: 'net', panel_port: 'net', domestic: 'dns', foreign: 'dns', fakeip_range: 'sb', mixed_port: 'sb' };
 // the DNS and sing-box steps are skipped when the data of an earlier installation is there: its settings stay
 function steps() {
   const all = [{ id: 'env', name: '环境检查', view: viewEnv }, { id: 'net', name: '网络', view: viewNet }, { id: 'dns', name: 'DNS 上游', view: viewDNS },
@@ -283,13 +285,13 @@ function steps() {
   return S.state.has_data ? all.filter(x => x.id !== 'dns' && x.id !== 'sb') : all;
 }
 function stepId() { return steps()[S.step].id; }
-const S = { state: null, step: 0, cfg: null, errors: {}, freed: [], freeing: null, freeErr: '', job: null, jobNext: 0, log: [], phase: 'wizard', redirectTimer: null, paused: false, logOpen: false };
+const S = { routesEdited: false, state: null, step: 0, cfg: null, errors: {}, freed: [], freeing: null, freeErr: '', job: null, jobNext: 0, log: [], phase: 'wizard', redirectTimer: null, paused: false, logOpen: false };
 
 function initCfg(st) {
   const ifs = st.ifaces, def = ifs.find(i => i.default) || ifs[0];
   S.cfg = {
     topology: ifs.length >= 2 ? '' : 'bypass',
-    lan: def ? [def.name] : [], wan: '', accept_gateway: false,
+    lan: def ? [def.name] : [], wan: '', accept_gateway: false, lan_gateway: '', client_nets: '',
     panel_port: st.defaults.panel_port,
     domestic: st.defaults.domestic, foreign: st.defaults.foreign,
     fakeip_range: st.defaults.fakeip_range, mixed_port: st.defaults.mixed_port, nodes: '',
@@ -360,7 +362,9 @@ function viewNet() {
   } else if (c.topology === 'gateway') {
     const sideHead = (cls, icon, name, tag) => `<div class="sh"><span class="ic">${icon}</span><span class="nm">${name}</span><span class="tag">${tag}</span></div>`;
     h += '<div class="g2">';
-    h += '<div class="side lan">' + sideHead('lan', I.home, 'LAN 网卡', '内网 · 可多选') + '<div class="ifs">' + ifs.map(i => ifRow(i, { name: 'lan_multi', bind: 'lan_multi', multi: true, selected: c.lan.includes(i.name) })).join('') + '</div>' + errOf('lan') + '</div>';
+    h += '<div class="side lan">' + sideHead('lan', I.home, 'LAN 网卡', '内网 · 可多选') + '<div class="ifs">' + ifs.map(i => ifRow(i, { name: 'lan_multi', bind: 'lan_multi', multi: true, selected: c.lan.includes(i.name) })).join('') + '</div>' + errOf('lan') +
+      `<div class="rt"><div class="sec"><label class="lbl" for="lan_gateway">LAN 侧网关</label><input class="inp mono${bad('lan_gateway')}" id="lan_gateway" type="text" data-bind="lan_gateway" value="${esc(c.lan_gateway)}" spellcheck="false" placeholder="客户端都在 LAN 网段时留空">${errOf('lan_gateway')}</div>
+      <div class="sec"><label class="lbl" for="client_nets">客户端网段</label><textarea class="inp${bad('client_nets')}" id="client_nets" data-bind="client_nets" spellcheck="false" placeholder="每行一个，例如 10.0.0.0/24">${esc(c.client_nets)}</textarea>${errOf('client_nets')}</div></div>` + '</div>';
     h += '<div class="side wan">' + sideHead('wan', I.globe, 'WAN 网卡', '外网 · 单选') + '<div class="ifs">' + ifs.map(i => ifRow(i, { name: 'wan', bind: 'wan', selected: c.wan === i.name })).join('') + '</div>' + errOf('wan') + '</div>';
     h += '</div>';
     h += `<div class="alert">${I.warn}<div class="grow"><div>LAN 网卡上的全部流量都会经过这台机器：FakeIP 和 IP 规则网段进入 sing-box，其余流量转发并 NAT 到 WAN。</div>
@@ -395,6 +399,10 @@ function viewConfirm() {
   let h = head('确认') + '<div class="tiles">';
   h += tile('部署方式', gw ? '双网卡网关' : '单网卡旁路由', gw ? `<span class="chip">LAN ${esc(c.lan.join(', '))}</span> <span class="chip wan">WAN ${esc(c.wan)}</span>` : esc(c.lan[0] || ''));
   h += tile('面板端口', esc(c.panel_port));
+  if (gw) {
+    const nets = c.client_nets.split('\n').map(x => x.trim()).filter(Boolean);
+    h += tile('回程路由', nets.length ? `<span class="mono">${esc(nets.join(', '))}</span>` : '不需要', nets.length ? `经 LAN 侧网关 <span class="mono">${esc(c.lan_gateway)}</span>` : '客户端都在 LAN 网段', true);
+  }
   if (S.state.has_data) {
     h += tile('设置', '沿用已有数据', '', true);
   } else {
@@ -627,6 +635,7 @@ function bind(t) {
   const f = t.dataset && t.dataset.bind;
   if (!f) return;
   const c = S.cfg;
+  if (f === 'lan_gateway' || f === 'client_nets') { c[f] = t.value; S.routesEdited = true; return; }
   if (f === 'lan_one') c.lan = [t.value];
   else if (f === 'lan_multi') { c.lan = [...document.querySelectorAll('[data-bind=lan_multi]:checked')].map(x => x.value); if (c.lan.includes(c.wan)) c.wan = ''; }
   else if (f === 'wan') { c.wan = t.value; c.lan = c.lan.filter(x => x !== c.wan); }
@@ -644,6 +653,17 @@ function bind(t) {
   }
   else if (f === 'panel_port' || f === 'mixed_port') c[f] = parseInt(t.value, 10) || 0;
   else c[f] = t.value;
+  if (['topology', 'lan_multi', 'wan'].includes(f)) prefillRoutes();
+}
+
+// The LAN-side gateway and the client networks come from the routes the machine already has through a LAN
+// interface, until the user types into them.
+function prefillRoutes() {
+  const c = S.cfg;
+  if (S.routesEdited || c.topology !== 'gateway') return;
+  const rs = (S.state.routes || []).filter(r => c.lan.includes(r.dev));
+  c.lan_gateway = rs.length ? rs[0].via : '';
+  c.client_nets = rs.filter(r => r.via === c.lan_gateway).map(r => r.net).join('\n');
 }
 
 (async function () {

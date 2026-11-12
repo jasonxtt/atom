@@ -782,3 +782,90 @@ func TestOneWayToClose(t *testing.T) {
 		t.Error("an unused wizard closes after the idle limit")
 	}
 }
+
+func TestClientRoutes(t *testing.T) {
+	ifaces := []Iface{{Name: "ens33", Addrs: []string{"10.0.2.4/24"}}, {Name: "ens34", Addrs: []string{"10.0.3.4/24"}, Default: true}}
+	lan := []string{"ens33"}
+	if r, errs := clientRoutes(lan, "", "", "28.0.0.0/8", ifaces); r != nil || errs != nil {
+		t.Errorf("both empty: clients on the LAN, no routes: %v %v", r, errs)
+	}
+	r, errs := clientRoutes(lan, "10.0.2.2", "10.0.0.0/24\n# a comment\n10.0.1.0/24\n10.0.0.0/24", "28.0.0.0/8", ifaces)
+	if errs != nil || len(r) != 2 || r[0] != (ClientRoute{"10.0.0.0/24", "10.0.2.2", "ens33"}) || r[1].Net != "10.0.1.0/24" {
+		t.Errorf("routes: %v %v", r, errs)
+	}
+	field := func(errs []FieldError, f string) string {
+		for _, e := range errs {
+			if e.Field == f {
+				return e.Msg
+			}
+		}
+		return ""
+	}
+	for _, c := range []struct{ gw, nets, field string }{
+		{"10.0.2.2", "", "client_nets"},            // a gateway without networks
+		{"", "10.0.0.0/24", "lan_gateway"},         // networks without a gateway
+		{"10.0.3.1", "10.0.0.0/24", "lan_gateway"}, // the gateway is on the WAN side
+		{"fe80::1", "10.0.0.0/24", "lan_gateway"},
+		{"10.0.2.2", "10.0.2.0/24", "client_nets"}, // already on the LAN
+		{"10.0.2.2", "10.0.0.5/24", "client_nets"}, // host bits
+		{"10.0.2.2", "0.0.0.0/0", "client_nets"},
+		{"10.0.2.2", "28.1.0.0/16", "client_nets"}, // inside the FakeIP range
+		{"10.0.2.2", "10.0.0.0/24 10.1.0.0/16 foo", "client_nets"},
+	} {
+		if _, errs := clientRoutes(lan, c.gw, c.nets, "28.0.0.0/8", ifaces); field(errs, c.field) == "" {
+			t.Errorf("%q %q: want an error on %s, got %v", c.gw, c.nets, c.field, errs)
+		}
+	}
+	cfg := Config{Topology: "gateway", LAN: lan, WAN: "ens34", AcceptGateway: true, LANGateway: "10.0.3.1", ClientNets: "10.0.0.0/24", PanelPort: 80, Domestic: defaultDomestic, Foreign: defaultForeign, FakeIPRange: defaultFakeIP, MixedPort: 7890}
+	if field(cfg.Validate(ifaces, 9996, func(int) string { return "" }), "lan_gateway") == "" {
+		t.Error("Validate must check the client routes of a gateway")
+	}
+	cfg.Topology, cfg.LAN = "bypass", []string{"ens33"}
+	if errs := cfg.Validate(ifaces, 9996, func(int) string { return "" }); len(errs) != 0 {
+		t.Errorf("a bypass installation ignores them: %v", errs)
+	}
+}
+
+func TestParseViaRoutes(t *testing.T) {
+	text := "default via 10.0.3.1 dev ens34 onlink \n10.0.0.0/24 via 10.0.2.2 dev ens33 src 10.0.2.4 \n10.0.2.0/24 dev ens33 proto kernel scope link src 10.0.2.4 \n10.9.9.9 via 10.0.2.2 dev ens33\n"
+	got := parseViaRoutes(text)
+	if len(got) != 1 || got[0] != (ClientRoute{"10.0.0.0/24", "10.0.2.2", "ens33"}) {
+		t.Errorf("%v", got)
+	}
+}
+
+func TestPolicyRouteWithClientRoutes(t *testing.T) {
+	s, err := renderPolicyRoute([]ClientRoute{{"10.0.0.0/24", "10.0.2.2", "ens33"}})
+	if err != nil || !strings.Contains(s, "ip route replace 10.0.0.0/24 via 10.0.2.2 dev ens33\n") || !strings.Contains(s, "lookup "+routeTable) {
+		t.Errorf("%v\n%s", err, s)
+	}
+	for _, bad := range []ClientRoute{{"10.0.0.0/24; reboot", "10.0.2.2", "ens33"}, {"10.0.0.1/24", "10.0.2.2", "ens33"}, {"10.0.0.0/24", "x", "ens33"}, {"10.0.0.0/24", "10.0.2.2", "ens33 && x"}} {
+		if _, err := renderPolicyRoute([]ClientRoute{bad}); err == nil {
+			t.Errorf("%v must be refused", bad)
+		}
+	}
+}
+
+func TestOwnRoutes(t *testing.T) {
+	a := ClientRoute{"10.0.0.0/24", "10.0.2.2", "ens33"}
+	b := ClientRoute{"10.0.1.0/24", "10.0.2.2", "ens33"}
+	table := map[string]string{}
+	existing := func(r ClientRoute) string { return table[r.Net] }
+	log := &recLogger{}
+	// the machine already has a: it stays the machine's; b is new and the installer's
+	table[a.Net] = "10.0.0.0/24 via 10.0.2.2 dev ens33 src 10.0.2.4 "
+	got, err := ownRoutes(nil, []ClientRoute{a, b}, existing, log)
+	if err != nil || len(got) != 1 || got[0] != b {
+		t.Errorf("%v %v", got, err)
+	}
+	// b, added by the installer before, is in the table now and still the installer's
+	table[b.Net] = "10.0.1.0/24 via 10.0.2.2 dev ens33 "
+	if got, err := ownRoutes([]ClientRoute{b}, []ClientRoute{a, b}, existing, log); err != nil || len(got) != 1 || got[0] != b {
+		t.Errorf("%v %v", got, err)
+	}
+	// a route for the network through another gateway is a conflict
+	table[a.Net] = "10.0.0.0/24 via 10.0.2.9 dev ens33 "
+	if _, err := ownRoutes(nil, []ClientRoute{a}, existing, log); err == nil {
+		t.Error("another gateway for the same network must be refused")
+	}
+}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"regexp"
 	"strconv"
 	"strings"
@@ -91,14 +92,35 @@ func checkIfaceNames(names []string) error {
 	return nil
 }
 
-// renderPolicyRoute is deploy-nft.md 3.3; ip rule is added only when it is not there yet.
-func renderPolicyRoute() string {
-	return fmt.Sprintf(`#!/bin/sh
+// renderPolicyRoute is deploy-nft.md 3.3; ip rule is added only when it is not there yet. The client routes
+// of a dual-NIC gateway follow: answers to clients behind the LAN-side router go back through the LAN.
+func renderPolicyRoute(routes []ClientRoute) (string, error) {
+	var b strings.Builder
+	fmt.Fprintf(&b, `#!/bin/sh
 # atom: policy routing for the TProxy mark. Written by atom-installer.
 set -e
 ip rule show | grep -q 'fwmark %[1]s lookup %[2]s' || ip rule add fwmark %[1]s lookup %[2]s priority %[3]s
 ip route replace local 0.0.0.0/0 dev lo table %[2]s
 `, fwmark, routeTable, routePriority)
+	for _, r := range routes {
+		if err := r.check(); err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "ip route replace %s via %s dev %s\n", r.Net, r.Via, r.Dev)
+	}
+	return b.String(), nil
+}
+
+// check makes sure a recorded route is safe to put into a shell script.
+func (r ClientRoute) check() error {
+	ip, n, err := net.ParseCIDR(r.Net)
+	if err != nil || ip.To4() == nil || n.String() != r.Net {
+		return fmt.Errorf("invalid client network %q", r.Net)
+	}
+	if v := net.ParseIP(r.Via); v == nil || v.To4() == nil {
+		return fmt.Errorf("invalid LAN gateway %q", r.Via)
+	}
+	return checkIfaceNames([]string{r.Dev})
 }
 
 // renderDNSUnit is deploy-nft.md 4: load the rules and the routing first, atomdns then fills the sets.

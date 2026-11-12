@@ -18,9 +18,11 @@ type InstallState struct {
 	Topology    string    `json:"topology"` // bypass | gateway
 	LAN         []string  `json:"lan"`
 	WAN         string    `json:"wan,omitempty"`
-	PanelPort   int       `json:"panel_port"`
-	NftBin      string    `json:"nft_bin"`
-	SysctlBin   string    `json:"sysctl_bin"`
+	// ClientRoutes (gateway only) are written into policy-route.sh, so they come back with every start.
+	ClientRoutes []ClientRoute `json:"client_routes,omitempty"`
+	PanelPort    int           `json:"panel_port"`
+	NftBin       string        `json:"nft_bin"`
+	SysctlBin    string        `json:"sysctl_bin"`
 }
 
 // Changes is etc/changes.json: what the installer changed on the system outside /opt/atom (and the unit
@@ -34,7 +36,9 @@ type Changes struct {
 	ResolvConfLink  string      `json:"resolv_conf_link,omitempty"` // the symlink target /etc/resolv.conf had
 	DisabledUnits   []UnitState `json:"disabled_units,omitempty"`
 	IPForwardBefore string      `json:"ip_forward_before,omitempty"`
-	AptInstalled    []string    `json:"apt_installed,omitempty"`
+	// Routes are the client routes the installer added; one that was there before is not listed and stays.
+	Routes       []ClientRoute `json:"routes,omitempty"`
+	AptInstalled []string      `json:"apt_installed,omitempty"`
 }
 
 // UnitState is a service the installer stopped to free a port, as it was before.

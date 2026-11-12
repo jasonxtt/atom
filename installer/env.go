@@ -266,3 +266,28 @@ func privateAddrs() []string {
 	}
 	return out
 }
+
+// parseViaRoutes picks the routes to a network through a gateway out of `ip -4 route show` (not the default
+// route, not on-link ones).
+func parseViaRoutes(text string) []ClientRoute {
+	out := []ClientRoute{}
+	for _, line := range strings.Split(text, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 5 || f[0] == "default" || !strings.Contains(f[0], "/") {
+			continue
+		}
+		r := ClientRoute{Net: f[0]}
+		for i := 1; i+1 < len(f); i++ {
+			switch f[i] {
+			case "via":
+				r.Via = f[i+1]
+			case "dev":
+				r.Dev = f[i+1]
+			}
+		}
+		if r.Via != "" && r.Dev != "" && r.check() == nil {
+			out = append(out, r)
+		}
+	}
+	return out
+}

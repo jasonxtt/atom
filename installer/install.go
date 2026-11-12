@@ -267,7 +267,11 @@ func (ins *Installer) writeNetworkFiles(st *InstallState, log Logger) error {
 	} else {
 		os.Remove(p.Etc("atom-gateway.nft"))
 	}
-	if err := writeFileAtomic(p.Lib("policy-route.sh"), []byte(renderPolicyRoute()), 0o755); err != nil {
+	pr, err := renderPolicyRoute(st.ClientRoutes)
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(p.Lib("policy-route.sh"), []byte(pr), 0o755); err != nil {
 		return err
 	}
 	for _, f := range []string{"atom.nft", "atom-gateway.nft"} {
@@ -330,7 +334,22 @@ func (ins *Installer) checkRouteTable() error {
 func (ins *Installer) stepNetwork(cfg Config, j *Job) error {
 	st := &InstallState{Version: ins.Version, InstalledAt: time.Now(), UpdatedAt: time.Now(), Topology: cfg.Topology, LAN: cfg.LAN, WAN: cfg.WAN,
 		PanelPort: cfg.PanelPort, NftBin: lookPathOr("nft", "/usr/sbin/nft"), SysctlBin: lookPathOr("sysctl", "/usr/sbin/sysctl")}
+	if cfg.Topology == "gateway" {
+		routes, errs := clientRoutes(cfg.LAN, cfg.LANGateway, cfg.ClientNets, cfg.FakeIPRange, listInterfaces())
+		if len(errs) > 0 {
+			return fmt.Errorf("客户端网段: %s", errs[0].Msg)
+		}
+		st.ClientRoutes = routes
+	}
 	ch := loadChanges(ins.Paths)
+	owned, err := ownRoutes(ch.Routes, st.ClientRoutes, func(r ClientRoute) string {
+		out, _ := quietCmd("ip", "-4", "route", "show", "exact", r.Net)
+		return out
+	}, j)
+	if err != nil {
+		return err
+	}
+	ch.Routes = owned
 	ch.Network = true // from here on the installer owns the network changes, until they are taken back
 	if cfg.Topology == "gateway" && ch.IPForwardBefore == "" {
 		if v, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward"); err == nil {
@@ -568,13 +587,54 @@ func teardownNetwork(p Paths, log Logger) {
 	ignore("nft", "delete", "table", "ip", "atom_nat")
 	ignore("ip", "rule", "del", "fwmark", fwmark, "lookup", routeTable, "priority", routePriority)
 	ignore("ip", "route", "flush", "table", routeTable)
+	for _, r := range ch.Routes {
+		ignore("ip", "route", "del", r.Net, "via", r.Via, "dev", r.Dev)
+	}
 	if ch.IPForwardBefore != "" {
 		if err := os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte(ch.IPForwardBefore), 0o644); err != nil {
 			log.Logf("  （忽略）恢复 ip_forward: %v", err)
 		}
 	}
-	ch.Network, ch.IPForwardBefore = false, ""
+	ch.Network, ch.IPForwardBefore, ch.Routes = false, "", nil
 	if err := saveChanges(p, ch); err != nil {
 		log.Logf("记录保存失败：%v", err)
 	}
+}
+
+// ownRoutes decides which client routes the installer owns: those it added before and still wants, and new
+// ones that are not in the routing table yet. A route the machine already has with the same gateway and
+// interface stays the machine's; one with another gateway is a conflict. Routes it added before and no longer
+// wants are deleted here. existing returns `ip -4 route show exact <net>`.
+func ownRoutes(before, want []ClientRoute, existing func(ClientRoute) string, log Logger) ([]ClientRoute, error) {
+	had := map[ClientRoute]bool{}
+	for _, r := range before {
+		had[r] = true
+	}
+	keep := map[ClientRoute]bool{}
+	var owned []ClientRoute
+	for _, r := range want {
+		keep[r] = true
+		if had[r] {
+			owned = append(owned, r)
+			continue
+		}
+		out := strings.TrimSpace(existing(r))
+		if out == "" {
+			owned = append(owned, r)
+			continue
+		}
+		if strings.Contains(out, "via "+r.Via+" ") && strings.Contains(out+" ", "dev "+r.Dev+" ") {
+			log.Logf("路由 %s via %s 已经有了，保留原样", r.Net, r.Via)
+			continue
+		}
+		return nil, fmt.Errorf("网段 %s 已经有路由（%s），和填写的网关 %s 不一致", r.Net, out, r.Via)
+	}
+	for _, r := range before {
+		if !keep[r] {
+			if err := runCmd(log, 30*time.Second, "ip", "route", "del", r.Net, "via", r.Via, "dev", r.Dev); err != nil {
+				log.Logf("  （忽略）%v", err)
+			}
+		}
+	}
+	return owned, nil
 }
