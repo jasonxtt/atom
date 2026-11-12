@@ -17,7 +17,7 @@ set -euo pipefail
 ATOM_VERSION="@VERSION@"
 ATOM_SHA256="${ATOM_SHA256:-@SHA256@}"
 ATOM_REPO="${ATOM_REPO:-@REPO@}"
-ATOM_MIRRORS="${ATOM_MIRRORS-https://gh-proxy.com/ https://ghfast.top/ https://ghproxy.net/}"
+ATOM_MIRRORS="${ATOM_MIRRORS-https://gh-proxy.com/ https://ghfast.top/ https://down.mxw.xx.kg/ https://gh.noki.icu/}"
 
 ROOT=/opt/atom
 ASSET="atom-${ATOM_VERSION}-linux-amd64.tar.gz"
