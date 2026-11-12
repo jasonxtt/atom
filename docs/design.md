@@ -423,7 +423,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
   - `GET rules` 返回 `{version, rules}`。规则的 JSON：`{id, enabled, remark, match: {domain, suffix, keyword, regex, ruleset, client, ip_cidr}, action: {type: proxy, group_id} | {type: direct} | {type: block}}`。
   - `POST rules` 新建，可以带 `before_id`/`after_id` 指定位置，默认放最后。`PUT rules/{id}` 整条替换。`DELETE rules/{id}?version=N` 删除。
   - `POST rules/move {id, before_id | after_id, version}` 拖动，`version` 必填。其他写操作的 `version` 可选，带了就检查。版本不对时返回 409，错误体里带当前 `version`。每次规则变化，版本加 1。
-  - `POST rules/test {domain, client?}` 返回命中的规则（`matched`、`index`、`action`、`group_id`、`rule`），没命中时返回 `{matched: false, fallthrough: "original"}`，即交给原判断。只看规则表，不模拟系统固定项和原判断。
+  - `POST rules/test {domain, client?}` 返回命中的规则（`matched`、`index`、`action`、`group_id`、`rule`），没命中时返回 `{matched: false, fallthrough: "original"}`，即交给原判断。只看规则表，不模拟系统固定项和原判断。规则页的测试没命中时显示"交给原判断（DNS）"，并标亮列表底部的原判断一行（第 11 节第 9 条）。
   - `GET rulesets` 列出内置集合（`type: builtin`）和自定义规则集；`GET rulesets/{id}` 带上列表内容。`POST rulesets` 的请求体是 `{name, type: remote, url, format?, category?}` 或 `{name, type: local, rules}`。`PUT rulesets/{id}` 改名、改地址或替换本地列表。`DELETE rulesets/{id}` 删除。`POST rulesets/{id}/refresh` 重新下载。
   - 错误体都是 AtomDNS 现有的 `{"error": "..."}`。写操作和 `rulesets` 的下载都占用管理租约，和设置、配置重载互斥（租约只防配置重载，不让写操作排队）。
   - 带 `client` 的代理规则返回 400（4.2）。下载期间规则集的来源被改掉，或者之后又开始了一次下载，返回 409，这次结果丢弃。修改已生效但缓存没清干净时返回 500（4.7）。
@@ -543,6 +543,11 @@ atom/
    - 菜单：概览、日志、上游、高级设置。概览照原版布局：查询数量、平均响应、缓存命中（各缓存命中数之和 / 查询数之和）、域名统计（不同域名数）；上游统计表（每个上游的请求数、采纳率、出错率、平均延迟，按组分段，含自定义组和 FakeIP 组）；分流状态环形图（规则命中占比，前 5 加"其他"，点图例看明细）；热门域名、活跃客户端、最慢查询。排行和图例都能点开明细（分页），明细里的日志行能点开单条详情。日志页点行看详情（基本、应答、分流与上游、上游尝试）。高级设置（宽屏时第一行是解析、重定向 / hosts、TTL 上限和查询日志，第二行缓存和域名学习并排，变窄后分行）：解析（核心模式、ECS、IPv4 优先、IPv6 屏蔽、类型屏蔽、空结果屏蔽）、缓存（两个开关叫"全局缓存""上游应答缓存"，每个缓存一行：条目、命中率、容量、过期保留、写盘间隔、清空）、域名学习（总开关、四类、定期刷新）、TTL 上限、查询日志（记录、容量、清空）、重定向 / hosts（原"重写"）。缓存的容量、过期保留、写盘间隔只显示不修改。
    - 后端：第 8 节表格里的 `caches`、`stats/upstreams`、`learning`、`requery`；`dns` 开放 `block_empty`；审计日志输出 `cache_status`；`lazy_cache` 管 `cache_atom_<组>`（4.8）；规则命中的域名不再学"无 V6"（4.8）；清缓存收窄（4.5.1 的"清缓存"，含"发布新一代配置时全清"的限制）。
    - 不恢复：DNS 分流模式、国内域名 FakeIP、黑白灰名单、广告总开关、客户端分流、DDNS、专属分流组、SOCKS5、学习状态面板、诊断抓取。
+
+9. **规则页：原判断和内置规则集选择**（2026-11-12，用户定）**[定]**：
+   - 规则列表最后固定一行"未命中以上规则"，带 DNS 标签：这部分是 AtomDNS 的 DNS 判断（3.1 第 3 层），不是 sing-box 的路由规则。不能拖动、编辑、删除。展开后按配置里的实际顺序列出 A/AAAA 查询的分支（`sequence_6666` 规则表之后、`process_listed.yaml`、`process_v4/v6.yaml`）：学到的无 V4 / 无 V6 → 空应答；`geosite_no_cn` → FakeIP · 代理 · 兜底分组；`geosite_cn` → 直连 · 国内 DNS；记忆代理 → FakeIP · 代理 · 兜底分组；记忆直连 → 直连（兼容模式国内 DNS，安全模式国外 DNS）；其余 → 按核心模式探测（兼容国内 DNS，安全国外 DNS）：国内 IP 或 `direct_ip` 直连，其他 IP FakeIP · 代理 · 兜底分组，上游没有给 IP 的不给地址（AAAA 学"无 V6"；兼容模式下 AAAA 失败也走 FakeIP，sing-box 对 AAAA 不给地址），并学习。注意 `geosite_no_cn` 排在 `geosite_cn` 前面、记忆代理排在记忆直连前面，这是 YAML 的顺序。
+   - 开关按 `GET dns` 的实际状态显示：空应答那一支要"空结果屏蔽"开着、对应学习类别生效；学习类别生效 = 总开关且类别开关（和 `route_learner` 编译时一样）；关掉的分支标"关"。跳转：geosite → 规则集页对应的默认规则集（`/rules/sets?set=<id>`），学习类分支 → DNS 高级设置的域名学习，其余 → 核心模式（`/dns/settings?at=learning|mode`）。代码 `webui/src/original.ts`（测试 `tests/original.test.mjs`）。
+   - 新建条件的规则集选择框只列 MetaCubeX 和 blackmatrix7 的目录条目，不再列默认规则集（`adguard`、`geosite_cn`、`geosite_no_cn`、`cuscn`、`cusnocn`）。已经引用默认规则集的规则（默认规则表第 2～4 条）照常显示、编辑、保存，可以删掉这个条件；删掉以后不能再从选择框选回来（用户接受：广告规则改用目录里的规则集）。
 
 每一步都单独验收后再进行下一步。实施顺序已认可。**[定]**
 
