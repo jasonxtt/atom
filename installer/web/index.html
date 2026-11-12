@@ -367,7 +367,7 @@ function viewNet() {
       <div class="sec"><label class="lbl" for="client_nets">客户端网段</label><textarea class="inp${bad('client_nets')}" id="client_nets" data-bind="client_nets" spellcheck="false" placeholder="每行一个，例如 10.0.0.0/24">${esc(c.client_nets)}</textarea>${errOf('client_nets')}</div></div>` + '</div>';
     h += '<div class="side wan">' + sideHead('wan', I.globe, 'WAN 网卡', '外网 · 单选') + '<div class="ifs">' + ifs.map(i => ifRow(i, { name: 'wan', bind: 'wan', selected: c.wan === i.name })).join('') + '</div>' + errOf('wan') + '</div>';
     h += '</div>';
-    h += `<div class="alert">${I.warn}<div class="grow"><div>LAN 网卡上的全部流量都会经过这台机器：FakeIP 和 IP 规则网段进入 sing-box，其余流量转发并 NAT 到 WAN。</div>
+    h += `<div class="alert">${I.warn}<div class="grow"><div>主路由需要把 FakeIP 网段和要代理的网段转到这台机器：从 LAN 网卡进来的 TCP、UDP 全部进入 sing-box，其余（如 ping）转发并 NAT 到 WAN。</div>
       <label class="agree"><input type="checkbox" data-bind="accept_gateway" ${c.accept_gateway ? 'checked' : ''}>我知道，继续</label>${errOf('accept_gateway')}</div></div>`;
   }
   h += `<div class="sec short"><label class="lbl" for="panel_port">面板端口</label><input class="inp${bad('panel_port')}" id="panel_port" type="number" min="1" max="65535" data-bind="panel_port" value="${esc(c.panel_port)}">${errOf('panel_port')}</div>`;

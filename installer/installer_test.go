@@ -20,9 +20,21 @@ func TestRenderNft(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`iifname != { "ens34", "ens35" } return`, "redirect to :7892", "tproxy ip to :7893 meta mark set 0x233 accept", "set fakeip4", "set iprule4", "delete table inet atom"} {
+	// Every IPv4 TCP and UDP from the LAN, not for this machine, goes to sing-box: no sets to pick from.
+	for _, want := range []string{
+		`iifname != { "ens34", "ens35" } return`,
+		"fib daddr type { local, broadcast, multicast } return",
+		"meta nfproto ipv4 meta l4proto tcp redirect to :7892\n",
+		"meta nfproto ipv4 meta l4proto udp tproxy ip to :7893 meta mark set 0x233 accept\n",
+		"delete table inet atom",
+	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("nft rules lack %q", want)
+		}
+	}
+	for _, unwanted := range []string{"set fakeip4", "set iprule4", "@fakeip4", "@iprule4", "ip daddr"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("nft rules still pick destinations: %q", unwanted)
 		}
 	}
 	if _, err := renderNft([]string{`eth0" }; flush ruleset; #`}); err == nil {
@@ -870,5 +882,17 @@ func TestOwnRoutes(t *testing.T) {
 	table[a.Net] = "10.0.0.0/24 via 10.0.2.9 dev ens33 "
 	if _, err := ownRoutes(nil, []ClientRoute{a}, existing, log); err == nil {
 		t.Error("another gateway for the same network must be refused")
+	}
+}
+
+// The gateway warning says what the topology needs (the main router sends this machine what is to be
+// proxied), not that all LAN traffic passes through it.
+func TestGatewayWarning(t *testing.T) {
+	page := string(indexHTML)
+	if !strings.Contains(page, "主路由需要把 FakeIP 网段和要代理的网段转到这台机器") {
+		t.Error("the gateway warning lacks what the main router must send here")
+	}
+	if strings.Contains(page, "全部流量都会经过这台机器") {
+		t.Error("the old gateway warning is still there")
 	}
 }

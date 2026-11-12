@@ -4,17 +4,24 @@
 
 ## 1. 导进 sing-box 的流量
 
-只有两类目标会被导进 sing-box，其余流量 VM 一概不碰：
+2026-11-12 改（用户定）：从局域网网卡进来、目标不是本机的 IPv4 TCP、UDP **全部**导进 sing-box，两种拓扑一样。原来只导目标在 FakeIP 网段和 IP 规则网段里的包（两个 nft 集合 `fakeip4`、`iprule4`，由 atomdns 维护），现在不再挑选，集合和 atomdns 维护集合的代码都删了。
 
-| 目标 | 来源 | TCP | UDP |
-|---|---|---|---|
-| FakeIP 网段（默认 `28.0.0.0/8`） | `settings.fakeip_range` | redirect → `redirect-in` 7892 | TProxy → `tproxy-in` 7893 |
-| IP 规则网段（只算 IPv4） | 启用的 `ip_cidr` 规则 | 同上 | 同上 |
+依据是用户的部署：atom 在主路由后面，主路由只把 FakeIP 网段和要代理的网段转给 atom（单网卡用静态路由；双网卡的 LAN 接主路由的 WAN2，主路由把这些网段走 WAN2）。所以到达 atom 的转发流量都是要代理的，由 sing-box 决定出口：
 
-- 两类网段放在 nft 表 `inet atom` 的两个集合里：`fakeip4`、`iprule4`。规则文件里两个集合都是空的，由 atomdns 填（第 4 节）。
-- 只看从局域网网卡进来的包（`iifname`）。目标是本机地址的包一律放过（`fib daddr type local return`），所以即使有人写了一条覆盖 VM 自己地址的 IP 规则，客户端问 VM 的 DNS（53）、管理 API（9099）也不会被导进 sing-box。
+| 目标 | sing-box 里怎么走 |
+|---|---|
+| FakeIP 网段（默认 `28.0.0.0/8`） | 有绑定走规则指定的组，没有走 Final；路由规则不参与（design.md 3.3） |
+| 真实 IP | 按 IP、端口、网络规则（design.md 4.6）；没命中走 Final |
+
+| 协议 | 去向 |
+|---|---|
+| TCP | redirect → `redirect-in` 7892 |
+| UDP | TProxy → `tproxy-in` 7893 |
+| 其他（ping 等） | 单网卡：不处理；双网卡：转发并 NAT 到 WAN（3.2） |
+
+- 只看从局域网网卡进来的包（`iifname`）。目标是本机地址的包一律放过（`fib daddr type local return`），所以客户端问 VM 的 DNS（53）、管理接口和面板不会被导进 sing-box。广播和组播（DHCP、mDNS、SSDP 之类）也放过。
 - **sing-box 自己发出的流量不会被导回来**：nft 只挂在 `prerouting` 上，本机进程（sing-box 的出站、atomdns 的上游查询）发出的包走 `output`，不经过这两条链。所以不需要给 sing-box 设 `routing_mark` 再在 nft 里排除。代价是本机进程访问 FakeIP 不会被处理（本机不需要：atomdns 的国外 DNS 走 7890，见 design.md 7.1）。
-- IPv6：v0 不做 IPv6 FakeIP；IPv6 的 IP 规则只对 7890 入站有效（sing-box 的路由规则），nft 不导 IPv6。
+- IPv6：v0 不做 IPv6 FakeIP；规则只匹配 IPv4（`meta nfproto ipv4`），IPv6 的包照常转发或丢弃，IPv6 的 IP 规则只对 7890 入站有效。
 
 ## 2. 端口、标记、路由表
 
@@ -36,51 +43,37 @@
 
 ```nft
 #!/usr/sbin/nft -f
-# atom: send FakeIP and IP-rule destinations from the LAN to sing-box.
+# atom: send TCP and UDP from the LAN to sing-box.
 table inet atom
 delete table inet atom
 table inet atom {
-	# Filled by atomdns (`nft -f`, one transaction) at start and after each application.
-	set fakeip4 {
-		type ipv4_addr
-		flags interval
-		auto-merge
-	}
-	set iprule4 {
-		type ipv4_addr
-		flags interval
-		auto-merge
-	}
-
 	# TCP: redirect to sing-box redirect-in (7892).
 	chain prerouting_tcp {
 		type nat hook prerouting priority dstnat; policy accept;
 		iifname != { @LAN@ } return
-		fib daddr type local return
-		ip daddr @fakeip4 meta l4proto tcp redirect to :7892
-		ip daddr @iprule4 meta l4proto tcp redirect to :7892
+		fib daddr type { local, broadcast, multicast } return
+		meta nfproto ipv4 meta l4proto tcp redirect to :7892
 	}
 
 	# UDP: TProxy to sing-box tproxy-in (7893); the mark sends it to table 233 (local).
 	chain prerouting_udp {
 		type filter hook prerouting priority mangle; policy accept;
 		iifname != { @LAN@ } return
-		fib daddr type local return
-		ip daddr @fakeip4 meta l4proto udp tproxy ip to :7893 meta mark set 0x233 accept
-		ip daddr @iprule4 meta l4proto udp tproxy ip to :7893 meta mark set 0x233 accept
+		fib daddr type { local, broadcast, multicast } return
+		meta nfproto ipv4 meta l4proto udp tproxy ip to :7893 meta mark set 0x233 accept
 	}
 }
 ```
 
-- 开头的 `table inet atom` + `delete table inet atom` 让文件可以重复加载：每次都整表替换，不会叠出重复规则。重新加载会把两个集合清空，所以加载后要让 atomdns 重新填（第 4 节）。
-- 集合用 `flags interval; auto-merge`：IP 规则里互相重叠的网段（比如 `91.108.0.0/16` 和 `91.108.4.0/22`）会合并，不会报冲突。
+- 开头的 `table inet atom` + `delete table inet atom` 让文件可以重复加载：每次都整表替换，不会叠出重复规则。表里没有集合，加载完就生效，不用等 atomdns。
 - 链名不能用 `redirect`、`tproxy`（nft 的关键字），所以叫 `prerouting_tcp` / `prerouting_udp`。
+- `meta nfproto ipv4`：`inet` 表也看 IPv6，sing-box 的 redirect、TProxy 入站只监听 IPv4。
 
 ### 3.2 只有双网卡网关要的：`/etc/atom/atom-gateway.nft`
 
 ```nft
 #!/usr/sbin/nft -f
-# atom, dual-NIC gateway only: everything else from the LAN is forwarded and NATed out of the WAN.
+# atom, dual-NIC gateway only: what is neither TCP nor UDP from the LAN is forwarded and NATed out of the WAN.
 table ip atom_nat
 delete table ip atom_nat
 table ip atom_nat {
@@ -91,7 +84,7 @@ table ip atom_nat {
 }
 ```
 
-`@WAN@` 是外网网卡名（不带引号，文件里已经有）。同时要开转发：`net.ipv4.ip_forward = 1`（写进 `/etc/sysctl.d/90-atom.conf`）。
+`@WAN@` 是外网网卡名（不带引号，文件里已经有）。同时要开转发：`net.ipv4.ip_forward = 1`（安装器由 `atom-dns.service` 的 `ExecStartPre` 设置）。TCP、UDP 都进了 sing-box，这张表现在只给非 TCP、UDP 的包（ping 等）用；安装器写的版本另有一条：WAN 网卡上丢掉发往面板端口的 TCP（design.md 9.2）。
 
 这份文件不带防火墙：`forward` 链默认放行。VM 本身就是网关时，WAN 侧进来的连接要不要拦，由用户现有的防火墙决定；安装器只提示，不替用户加。**[建议]**
 
@@ -106,49 +99,45 @@ ip route replace local 0.0.0.0/0 dev lo table 233
 
 单网卡旁路由**不需要** `ip_forward`：redirect 和 TProxy 都把包交给本机的 socket，不经过转发。联调时单网卡形态是在 `ip_forward=0` 下测通的。
 
-## 4. 集合由 atomdns 维护 **[定]**
+## 4. 服务的顺序 **[定]**
 
-- 配置：`atom_rules.yaml` 的 `singbox.nft_table: atom`（产品配置里写死）；`singbox.nft` 是命令，默认 `[nft]`。没写 `nft_table` 就不碰 nft（测试配置）。
-- 时机：每次 sing-box 应用成功之后（FakeIP 网段和 IP 规则只会随应用变化，所以只改域名规则、改名这类不会动 nft），`POST apply` 之后，以及每次启动和重新加载配置时（不管 sing-box 要不要重新应用）。
-- 内容：取自正在运行的 sing-box 配置文件 `config.json`（应用失败回滚后就是旧配置），读不到时才用 atom 的状态。
-- 做法：写一个临时脚本，`nft -f` 一次执行，两个集合都先 `flush` 再 `add element`，是一个事务，中间状态看不到。只写 IPv4 的 IP 规则网段，去重。
-- 失败（表没装、nft 不在 PATH 里）不回滚规则的改动：sing-box 已经按新规则在跑，只记日志，`GET status` 的 `nft.sync` 是 `{at, ok: false, error, sets}`。成功时 `ok: true`，`sets` 是写进去的内容。`nft.table` 给出表名。
-- 更新在应用锁里做，两次修改的 nft 更新不会乱序。
+2026-11-12 之前，规则文件里的集合是空的，由 atomdns 在启动和每次应用 sing-box 后用 `nft -f` 填（`singbox.nft_table`、`status.nft.sync`）。改成全部导入后没有集合了，atomdns 不再碰 nft，`atom_rules.yaml` 的 `nft_table`、`nft` 和 `GET status` 的 `nft` 都删了。
 
-所以服务的顺序是：先加载规则文件和策略路由，再启动 atomdns。安装器的写法 **[建议]**：atomdns 的单元里
+安装器的写法仍是 atomdns 的单元里先加载规则文件和策略路由：
 
 ```ini
-ExecStartPre=/usr/sbin/nft -f /etc/atom/atom.nft
-# 网关形态再加一行：
-ExecStartPre=/usr/sbin/nft -f /etc/atom/atom-gateway.nft
-ExecStartPre=/usr/lib/atom/policy-route.sh
+ExecStartPre=/usr/sbin/nft -f /opt/atom/etc/atom.nft
+# 网关形态再加两行：
+ExecStartPre=/usr/sbin/nft -f /opt/atom/etc/atom-gateway.nft
+ExecStartPre=/usr/sbin/sysctl -w net.ipv4.ip_forward=1
+ExecStartPre=/opt/atom/lib/policy-route.sh
 ```
 
-这样 atomdns 每次启动都先把表整个重新加载，然后自己把集合填上。手动重新加载了规则文件，要重启 atomdns（或者 `POST /api/v1/atom/apply`）让它重新填集合。联调用的就是这种写法（`net-up.sh` 做了这三件事）。
+手动重新加载规则文件后不用再做别的。
 
 ## 5. 单网卡旁路由
 
 ```text
-客户端 ──默认网关──> 主路由 ──静态路由 FakeIP 网段、IP 规则网段──> VM（atomdns + sing-box）
+客户端 ──默认网关──> 主路由 ──静态路由 FakeIP 网段、要代理的网段──> VM（atomdns + sing-box）
    ^                                                              │
    └────────────────────── VM 直接回包（同一网段）─────────────────┘
 ```
 
 - 客户端的 DNS 指向 VM（DHCP 下发）。
-- 主路由加静态路由：**FakeIP 网段和每条 IP 规则的网段**都指向 VM。只加 FakeIP 网段的话，IP 规则只对 7890 的流量有效。IP 规则改了，主路由的静态路由也要跟着改（安装器和 WebUI 要提示）。**[建议]**
+- 主路由加静态路由：**FakeIP 网段和要代理的网段**（IP 规则用到的网段）都指向 VM。只加 FakeIP 网段的话，IP 规则只对 7890 的流量有效。转到 VM 的 TCP、UDP 全部进 sing-box，没命中 IP、端口、网络规则的真实 IP 走 Final，所以不要把不想代理的网段转过来。IP 规则改了，主路由的静态路由也要跟着改。**[建议]**
 - `@LAN@` 是 VM 唯一的网卡。
 - **没有实测的风险**：去程经过主路由、回程由 VM 直接发给客户端，主路由只看到一半的连接。主路由的转发链如果有"丢弃 invalid 状态"的规则（RouterOS 的默认防火墙就有），可能把后续的包丢掉。处理办法二选一：在主路由的转发链里，对目标是 FakeIP 网段和 IP 规则网段的包，在 drop invalid 之前放行；或者用 DHCP option 121（无类别静态路由）把这些网段的路由直接下发给客户端，客户端就直接发给 VM，不经过主路由。联调是用 netns 模拟的（第 7 节），客户端上直接加了到 VM 的路由，相当于第二种办法，没有经过真实的主路由。
 
 ## 6. 双网卡网关
 
 ```text
-客户端 ──默认网关──> VM 的 LAN 网卡 ──┬─ FakeIP / IP 规则网段 → sing-box → 节点
-                                       └─ 其他 → 转发 + NAT → WAN 网卡 → 上级路由
+客户端 ──> 主路由 ──FakeIP 网段、要代理的网段走 WAN2──> VM 的 LAN 网卡 ──┬─ TCP / UDP → sing-box → 节点（或 direct）
+                                                                       └─ 其他（ping）→ 转发 + NAT → WAN 网卡 → 上级
 ```
 
-- LAN 的**全部**流量都经过 VM，安装器必须明确告诉用户（design.md 9.1）。
-- 规则：3.1 + 3.2 + 3.3，`ip_forward = 1`。
-- 和 xray 那台机器（10.0.2.1，只读参考过）的区别：xray 把 LAN 进来的**所有** TCP/UDP 都导进 sing-box（只放过目标是本机的包），本机流量在 `output` 链按目标打标记再导回去，并用 mark `0xff` 排除 sing-box 自己的流量。atom 只导两个集合里的目标，其余照常转发，所以不需要 `output` 链和排除标记。xray 的 TProxy 标记是 `0x1`、路由表 100，atom 换成 `0x233`、233，避免和已有配置撞上。
+- 用户的接法（2026-11-12）：VM 的 LAN 接主路由的 WAN2，主路由把 FakeIP 网段和要代理的网段走 WAN2。所以到达 VM 的转发流量都是要代理的，安装器的警告写的是"主路由需要把 FakeIP 网段和要代理的网段转到这台机器"（原来是"LAN 的全部流量都会经过这台机器"）。
+- 规则：3.1 + 3.2 + 3.3，`ip_forward = 1`。客户端不在 LAN 网段时的回程路由（`policy-route.sh` 里的 client routes）和面板只对 LAN 开放的规则见 design.md 9.2，不变。
+- 和 xray 那台机器（10.0.2.1，只读参考过）比：现在一样是把 LAN 进来的所有 TCP/UDP 都导进 sing-box（只放过目标是本机的包）；xray 另外在 `output` 链按目标打标记把本机流量也导回去，并用 mark `0xff` 排除 sing-box 自己的流量，atom 不处理本机流量，所以不需要。xray 的 TProxy 标记是 `0x1`、路由表 100，atom 换成 `0x233`、233，避免和已有配置撞上。
 
 ## 7. 联调实测（2026-11-09，mosdns-rust，临时环境）
 
@@ -162,14 +151,11 @@ ExecStartPre=/usr/lib/atom/policy-route.sh
   - 注意：netns 里的程序解析域名走的是宿主的 systemd-resolved，不是测试网关。脚本里一律先 `dig @网关` 再 `curl --resolve`。
 - 脚本和输出在共享笔记目录 `step4-e2e/`（`run.sh` 到 `run4.sh`）。
 
-结果都符合预期，详见 design.md 第 11 节第 4 条。单网卡和网关两种形态都实测过；第 5 节的主路由风险没有实测条件。
+结果都符合预期，详见 design.md 第 11 节第 4 条。单网卡和网关两种形态都实测过；第 5 节的主路由风险没有实测条件。这是按集合挑选目标时的实测；改成全部导入后的实测见第 8 节。
 
-## 8. 已知限制
+## 8. 全部导入的实测（2026-11-12，测试机 `atom`）
 
-- **补偿时重载失败，nft 和 sing-box 不一致**（codex 第 3 轮复审指出，决定记为限制、不改代码）。
-  - 触发条件：要同时出现两次失败。先是一次修改已经应用到 sing-box，但保存 atom 的文件失败；接着补偿时旧的 `config.json` 写回成功，重载命令却失败了，没能让 sing-box 换回旧配置。
-  - 表现：sing-box 还在跑新配置，nft 集合却按写回的旧文件更新了。新 FakeIP 网段或新 IP 规则的流量不再被导进 sing-box。接口返回 500，错误里写"已写回旧配置，但重载后没有确认"；`GET status` 的 `singbox.in_sync` 显示不一致。
-  - 恢复：再应用一次，任意一次成功的修改都行，或者 `POST /api/v1/atom/apply`。应用成功后 sing-box 和 nft 都回到 atom 的状态。
+见共享笔记 `rules-nft.md` 和 design.md 第 11 节（结果写在完成后）。
 
 ## 9. 卸载
 

@@ -1,6 +1,6 @@
 # atom 设计文档 v0
 
-状态：v0 已审，第 12 节的问题已答复；第 2 步实现时新定的事项写回了第 3、4、8 节，第 3 步的写回了第 4.6、5、6、8 节，第 4 步的写回了第 4.6、6、7.3、9.4、11 节，第 5 步的写回了第 4.5、7.2、8、11 节，第 6 步（6a）的写回了第 3.2、4.4、4.5.1、7.1、7.2、8、11 节，第 7 步的写回了第 6、7.1、9.2、10、11 节。日期：2026-11-12。
+状态：v0 已审，第 12 节的问题已答复；第 2 步实现时新定的事项写回了第 3、4、8 节，第 3 步的写回了第 4.6、5、6、8 节，第 4 步的写回了第 4.6、6、7.3、9.4、11 节，第 5 步的写回了第 4.5、7.2、8、11 节，第 6 步（6a）的写回了第 3.2、4.4、4.5.1、7.1、7.2、8、11 节，第 7 步的写回了第 6、7.1、9.2、10、11 节；2026-11-12 的规则条件和 nft 改动写回了第 3.3、4.2、4.6、6、7.3、8、9.1、9.2、9.4 节。日期：2026-11-12。
 
 标记说明：**[定]** 表示已经和用户确认；**[建议]** 是我的提议，等审阅；**[待定]** 表示还要讨论。
 
@@ -81,6 +81,7 @@ FakeIP 流量 ─>│ FakeIP 还原域名 → 绑定的出口 / route.final → 
 - 只在发往本机 sing-box FakeIP 入口的查询上附加；其他上游不带这个选项，避免泄露到公网。
 - 先剥掉客户端自带的 65001 选项，再写入自己的指令。
 - 规则命中"代理 → 组 X"时发 SET X；原判断的结果是国外时发 CLEAR，由 `route.final` 处理。所以大部分域名不会在 sing-box 里留绑定记录。**[定]**
+- CLEAR 的含义（2026-11-12，用户定）**[定]**：走 Final，不经过路由规则。DNS 判定走代理、给了 FakeIP 的连接一定走代理：有绑定走规则指定的组，没有绑定走 Final，sing-box 的路由规则（IP、端口、网络规则）一概不参与。三个入口一样：redirect、TProxy（含 PreMatch）还原 FakeIP 时、mixed 入站 `resolve` 得到 FakeIP 时。原来的补丁是"有绑定才跳过路由规则"，没绑定的 FakeIP 连接会先过路由规则，比如一条端口规则会把没命中规则的国外域名截走；没有改成给每个国外域名发 SET final，那样绑定会越存越多，也挤占绑定账本。见 [singbox-fakeip-outbound.md](singbox-fakeip-outbound.md)。
 - 实现（第 1 步）：在 fork 的 `rust/native-host/src/edns_directive.rs`，挂在 `ForwardCatalog` 发往上游的出口上，所有上游查询都经过这里。发往 `nocnfake` 组的查询：去掉客户端带的 65001，加上 CLEAR（`[1,2]`）；客户端没有 OPT 时补一个 OPT（UDP 大小 1232）。发往其他组的查询：没有 65001 时原样发出；带了就去掉，其他 option（ECS、cookie 等）保留。剥 65001 只按 OPT 的结构逐个遍历选项，不依赖 ECS 等选项的语义校验（比如重复 ECS 时照样剥）；附加记录连结构都解析不了的查询，对所有上游都拒绝，不原样发出。`nocnfake` 的查询还要通过完整的 OPT 校验，过不了就报错，不发给 sing-box。改写过的查询一律用展开后的域名重建问题段，因为原包里的压缩指针可能指向后面会移动的选项字节。
 - 注意：FakeIP 应答会进全局缓存（`cache_all`），命中缓存时不再问 sing-box，也就不会重发 CLEAR/SET。第 1 步只有 CLEAR，不受影响；第 2 步发 SET 以后，规则变化要按 4.5 清缓存。
 - SET 的实现（第 2 步）：规则表插件命中"代理 → 组 X"时，把 X 写进查询状态（`ExecutionState::outbound`，在 `sequence-core`）；`ForwardCatalog` 发往上游时把它交给 `edns_directive.rs`，发往 `nocnfake` 的查询写 SET X，没有 X 时写 CLEAR，其他上游不带。规则表排在 `cache_all` 前面，命中代理规则的查询不经过全局缓存，每次都会把 SET 发给 sing-box；规则每次变化都清空全局缓存（4.5.1 的"清缓存"），所以删掉代理规则后，`cache_all` 里不会留着旧的 FakeIP 挡住 CLEAR。**[定]**
@@ -113,10 +114,20 @@ Rule {
 | `client` | 来源客户端 IP 或网段，可以和域名条件组合 |
 | `ip_cidr` | 目标 IP 网段，用于 Telegram 这类直接按 IP 连接的流量，见 4.6 |
 | `ip_ruleset` | 取规则集的 IP 部分（第 6b 步，4.6、4.9）：`ruleset` 取域名部分，两个都填就是整个规则集 |
+| `port` / `port_range` | 目标端口、端口范围（`起始:结束`，一边可以空），由 sing-box 匹配，只管真实 IP 的连接（2026-11-12，见 4.6） |
+| `network` | `tcp`、`udp`，由 sing-box 匹配，同上 |
 
 一条规则内部是"或"还是"与"：**[定]** 同一类条件之间是"或"，不同类之间是"与"。比如"suffix google.com 或 youtube.com，并且客户端是 192.168.1.50"。
 
 "类"的划分（第 2 步实现时定下）：`domain`、`suffix`、`keyword`、`regex`、`ruleset` 都是域名条件，算同一类；`client` 是第二类；IP 部分（`ip_cidr`、`ip_ruleset`）由 sing-box 匹配（4.6）。所以"domain a.com，ruleset 广告"表示 a.com 或广告域名。只有 `client` 条件的规则匹配这个客户端的所有域名。规则至少要有一个条件。
+
+端口和网络条件（2026-11-12，用户定）**[定]**：`port`、`port_range`、`network` 和 IP 部分一起编成 sing-box 路由规则，语义同 sing-box 无头规则：不同字段之间是"且"，同一字段的多个值是"或"（所以"IP 网段 A 或 B，且 TCP 端口 443"）。DNS 查询时不知道端口，所以带端口或网络条件的规则不能再带域名类条件或客户端条件（400）；动作可以是代理、直连、屏蔽。它们只管真实 IP 的连接（方案 A）：FakeIP 连接在 sing-box 里按绑定或 Final 走，不经过路由规则（3.3）。
+
+所以一条规则里，域名类条件之间是"或"；客户端和域名类之间是"且"；IP 部分和域名类之间按同一动作分别在 sing-box 和 AtomDNS 里匹配，效果上是"或"；端口、网络和 IP 部分之间是"且"。规则编辑页按这个关系在条件块之间标小字"或""且"（块按 域名类、IP 部分、端口、网络、客户端 的顺序显示）。
+
+界面的叫法（2026-11-12，用户定）：规则编辑页的条件分"内置规则集"（MetaCubeX、blackmatrix7 目录，原来叫"规则源"）、"自定义规则集"和"自定义条件"（域名、目标 IP 网段、目标端口、网络、客户端，原来叫"匹配器"）；规则集页原来叫"内置"的 `cuscn`、`cusnocn`、`adguard`、`geosite_cn` 等叫"默认规则集"。
+
+粘贴 sing-box 规则（2026-11-12）：规则编辑页可以粘贴一条 sing-box 无头规则 JSON，按字段拆进条件：`domain`、`domain_suffix`、`domain_keyword`、`domain_regex` 进域名条件（`domain_suffix` 开头的点去掉，所以也匹配这个域名本身），`ip_cidr`、`port`、`port_range`、`network` 进对应条件，`source_ip_cidr` 进客户端条件。其他字段（`rule_set`、`protocol`、`process_*`、`invert`、需要嗅探的字段等）直接报错，不静默忽略。在前端拆（`webui/src/singboxRule.ts`），接口不变：拆出来的条件照常保存、照常由后端校验。不开嗅探，不加需要嗅探的条件。
 
 客户端条件取反（第 6 步，用户定的）**[定]**：`match.client_invert` 为 true 时，"客户端不在 `client` 列表内"才算命中。只能和 `client` 一起用，单独给返回 400；和域名条件之间仍然是"与"；动作仍然只能是直连或屏蔽。一条规则一个动作，不命中就继续往下匹配；不做"全部代理"。AtomDNS 原来的两种客户端分流模式用规则写：
 
@@ -205,14 +216,16 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 
 ### 4.6 IP 规则
 
-目标是 IP 的规则不经过 DNS，AtomDNS 处理不了。控制面把它们编译成 sing-box 的 `ip_cidr` 路由规则，同时让 nft 把这些网段导进 sing-box。这是唯一一类在 sing-box 里匹配的规则。**[建议]**
+目标是 IP 的规则不经过 DNS，AtomDNS 处理不了。控制面把它们编译成 sing-box 的 `ip_cidr` 路由规则。这是唯一一类在 sing-box 里匹配的规则（2026-11-12 起还有端口、网络条件，见下）。**[建议]**
 
 第 3 步定下的 **[定]**：
 
 - 带 `ip_cidr` 的规则只能单独用，不能再带域名或 `client` 条件（否则 400）。动作可以是代理、直连、屏蔽。第 6b 步改为 **[定]**：IP 部分（`ip_cidr`、`ip_ruleset`）可以和域名条件写在同一条规则里，域名在 DNS 里匹配、网段在 sing-box 里匹配，用同一个动作；带 `client` 的规则仍然不能有 IP 部分（客户端名单在 AtomDNS，sing-box 判断不了）。`ip_ruleset` 的网段来自规则集下载内容里的 IP 条目（`<id>-<revision>.ip.txt`，规则集的 `ip_count`），按规则表顺序和 `ip_cidr` 合在一起编成 sing-box 路由规则；还没有网段的规则集不产生 sing-box 规则。规则的改动仍是先应用 sing-box 再保存；规则集下载改变了网段时，先保存规则集，再重新应用一次 sing-box（trigger `rulesets`），应用失败时规则集照样更新，sing-box 继续用旧网段（`in_sync` 为 false），下次应用时补上。
 - AtomDNS 的 DNS 匹配跳过它们（`rules/test` 也不会命中）。启用的 IP 规则按规则表里的顺序编译成 sing-box 路由规则，排在 mixed 入站的 `resolve` 之后：代理 → `route` 到组，直连 → `route` 到 `direct`，屏蔽 → `reject`。网段写回规范形式（主机位清零）。
 - 改动规则时，如果启用的 IP 规则（网段、动作、顺序）有变化，就走一遍 sing-box 应用事务（第 6 节），应用失败时规则的改动也不保存。只改域名规则不碰 sing-box。
-- nft 部分（第 4 步实现，见 9.4）：nft 规则把 FakeIP 网段和 IP 规则网段导进 sing-box，网段放在 nft 集合里，由 atomdns 在每次应用成功后和启动时更新；`GET status` 的 `nft` 给出网段（分 inet4/inet6）、表名和最近一次更新的结果。只导 IPv4：IPv6 的 IP 规则只对 7890 入站有效。单网卡旁路由时，IP 规则的网段也要在主路由上加静态路由，否则只对 7890 有效。
+- nft 部分（第 4 步实现，2026-11-12 改，见 9.4）：nft 把从 LAN 网卡进来、目标不是本机的 IPv4 TCP、UDP 全部导进 sing-box，不再按网段挑选，atomdns 也不再维护 nft 集合（`GET status` 去掉了 `nft`）。主路由只把 FakeIP 网段和要代理的网段转给这台机器，所以 IP 规则的网段要在主路由上转过来，否则只对 7890 有效。IPv6 的 IP 规则只对 7890 入站有效。
+- 端口、网络条件和 FakeIP（2026-11-12）**[定]**：路由规则只管真实 IP 的连接。生成的每条规则都是 `logical and`：`{ip_cidr: [FakeIP 网段], invert: true}` 加上规则自己的条件（`ip_cidr`、`port`、`port_range`、`network`），作为保险把 FakeIP 网段排除在外（补丁已经让 FakeIP 连接在路由规则之前按绑定或 Final 走）。`ip_cidr` 条目和 FakeIP 网段重叠的拒绝保存（400），改 FakeIP 网段时和已有的 `ip_cidr` 条目重叠也拒绝；原来没有这项校验。规则集里的网段（`ip_ruleset`）不校验，靠上面的排除。只有端口或网络条件、没有 IP 部分的规则匹配所有真实 IP；IP 部分来自规则集、但规则集还没有网段时，这条规则不产生 sing-box 规则（否则会放宽成所有 IP）；删除规则集后只剩端口或网络条件的规则一起删除。
+- 没被任何规则命中的真实 IP 连接走 `route.final`（Final）：到达这台机器的转发流量都是主路由转过来、要代理的（9.1）。
 - 没有配置 `singbox` 段时（比如测试配置），`ip_cidr` 规则仍然返回 400。
 
 ### 4.7 实现（第 2 步）
@@ -313,7 +326,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 | `dns.servers` | `fakeip`：inet4 网段，默认 `28.0.0.0/8`，可配置 **[定]**；`resolver`：解析节点域名用的普通上游 |
 | `dns.rules` | A/AAAA → fakeip |
 | `outbounds` | 节点 `n-*`、节点组 `g-*`、`direct` |
-| `route.rules` | `dns-in` → hijack-dns；`mixed-in` → resolve（AtomDNS）→ FakeIP 地址走绑定或 Final，其他走 direct；IP 规则（4.6）→ 对应的组 |
+| `route.rules` | `dns-in` → hijack-dns；`mixed-in` → resolve（AtomDNS）→ FakeIP 地址走绑定或 Final，其他走 direct；IP、端口、网络规则（4.6）→ 对应的组，只对真实 IP 的连接生效。FakeIP 连接（三个入口）在路由规则之前按绑定或 Final 走（3.3） |
 | `route.final` | Final selector |
 | `experimental.cache_file` | 启用，`store_fakeip: true`（锁定） |
 | `experimental.clash_api` | 只监听 127.0.0.1，带随机生成的密钥 |
@@ -342,10 +355,10 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 - **两个文件的写入顺序**（codex 复审后改）：只有确认删除组会同时改规则和节点状态。先写规则（引用改成 Final），再写去掉该组的 `atom_proxy.json`；两次写之间崩溃，留下的只是一个没被引用的组，下次照常启动。第二次写失败时把规则文件写回原样，写回也失败就在错误里说明。
 - **凭据文件权限**：`webinfo/atom_proxy.json` 和 sing-box 的 `config.json`（含 `config.json.next` 和写入时的临时文件）都以 0600 写入。
 - **启动时**（包括 AtomDNS 每次重新加载配置后）：生成一遍配置，和运行中的文件比较；不一致（第一次启动、升级后生成规则变了、默认 resolver 跟着国内上游变了）就应用一次；失败只记日志和 `status`，不影响 DNS。
-- **生成的内容**（对应上表）：`inbounds` 的 redirect/tproxy/mixed 监听 `0.0.0.0`；`dns.servers` 是 `fakeip`、`resolver`、`atomdns`（mixed 入站 `resolve` 用），`dns.rules` 把 A/AAAA 交给 `fakeip`，`dns.final` 是 `resolver`；`route.default_domain_resolver` 是 `resolver`，节点域名不会走 FakeIP；路由规则依次是 `dns-in` → `hijack-dns`、`mixed-in` → `resolve`（`server: atomdns`、`disable_cache: true`）、IP 规则（4.6）、`mixed-in` 且目标是域名（`domain_regex: ["."]`）→ `direct`；`route.final` 是 `final`；出口依次是节点、组、Final、`direct`、`block`。
+- **生成的内容**（对应上表）：`inbounds` 的 redirect/tproxy/mixed 监听 `0.0.0.0`；`dns.servers` 是 `fakeip`、`resolver`、`atomdns`（mixed 入站 `resolve` 用），`dns.rules` 把 A/AAAA 交给 `fakeip`，`dns.final` 是 `resolver`；`route.default_domain_resolver` 是 `resolver`，节点域名不会走 FakeIP；路由规则依次是 `dns-in` → `hijack-dns`、`mixed-in` → `resolve`（`server: atomdns`、`disable_cache: true`）、IP/端口/网络规则（4.6，每条是排除 FakeIP 网段的 `logical and`）、`mixed-in` 且目标是域名（`domain_regex: ["."]`）→ `direct`；`route.final` 是 `final`；出口依次是节点、组、Final、`direct`、`block`。
 - **resolver**：设置里留空时，用 `singbox.resolver_group` 那个上游组里第一个启用的 `udp://`/`tcp://` 地址条目，没有就用第一个带 `dial_addr` 的条目（`udp://dial_addr`），再没有用 `udp://223.5.5.5`。用户指定时只接受 IP、`udp://IP[:端口]`、`tcp://IP[:端口]`（域名本身还要解析）。
 - **设置**（`settings`）：`fakeip_range`（IPv4 网段，前缀 8 到 24，主机位为 0，不能是回环；注意改网段会让 sing-box 清空已有的 FakeIP 映射和绑定，客户端缓存里的旧 FakeIP 失效，要等客户端重新查 DNS；这次重载如果失败，回滚到旧配置也找不回原来的映射，见 [singbox-fakeip-outbound.md](singbox-fakeip-outbound.md) 的已知限制）、`resolver`、`mixed_port`（不能和 atom 的其他端口冲突）。改 FakeIP 网段后清空 AtomDNS 的缓存（旧网段的 FakeIP 应答）。改 mixed 端口后，如果 AtomDNS 的 `main_proxy` 正指向 `127.0.0.1:<旧端口>`，就把它改成新端口（写 `webinfo/settings.json` 并重新加载 AtomDNS 配置）；指向别的地址时不动。
-- **7890 的 sing-box 补丁**：`resolve` 解析出的地址全部属于 FakeIP 时，按地址对应的域名查绑定，有就走绑定的组，没有就走 `route.final`；地址被丢掉，目标保留域名。见 [singbox-fakeip-outbound.md](singbox-fakeip-outbound.md) 的"代理入站"。
+- **7890 的 sing-box 补丁**：`resolve` 解析出的地址全部属于 FakeIP 时，按地址对应的域名查绑定，有就走绑定的组，没有就走 `route.final`；地址被丢掉，目标保留域名。见 [singbox-fakeip-outbound.md](singbox-fakeip-outbound.md) 的"代理入站"。redirect、TProxy 入站还原 FakeIP 时同样如此（2026-11-12 起没有绑定也不再匹配路由规则，3.3）。
 
 ## 7. 锁定与开放
 
@@ -380,9 +393,9 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 
 由控制面一处修改、同时下发到各组件：
 
-- FakeIP 网段：sing-box 的 `inet4_range`、nft 集合（atomdns 更新，9.4）、主路由静态路由（文档提示用户配置）。
+- FakeIP 网段：sing-box 的 `inet4_range`、生成的路由规则里排除 FakeIP 网段的那一项（4.6）、主路由静态路由（文档提示用户配置）。nft 不再按网段挑选（9.4）。
 - IPv6：v0 不做 IPv6 FakeIP；被代理域名的 AAAA 查询返回空应答。**[建议]**
-- IP 规则网段：sing-box 路由规则和 nft 集合（atomdns 更新，9.4）；单网卡旁路由时还有主路由静态路由（提示用户配置）。
+- IP 规则网段：sing-box 路由规则；主路由要把这些网段转到这台机器（静态路由或走 LAN 那个口），否则只对 7890 有效。
 
 ## 8. 管理 API **[定]**
 
@@ -419,7 +432,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
   - `GET groups` 的每个组带 `empty`、`builtin`，selector 带当前选中 `now`。`POST groups {name, type: selector|urltest, members, selected?, url?, interval?, tolerance?}` 新建，`PUT groups/{id}` 整组替换，`DELETE groups/{id}?confirm=true`（见 5.3），`POST groups/{id}/select {name}`，`POST groups/{id}/delay {url?, timeout?}`（毫秒，默认 5000）返回 `{delays: {成员: 毫秒}}`。
   - `GET final` 返回 `{version, members, selected, empty}`。`PUT final {members?, selected?}`：成员变了走应用事务；只改选中项走 Clash API。
   - `GET settings` 返回 `{version, fakeip_range, resolver, resolver_effective, mixed_port, direct_ttl_max, fakeip_ttl_max}`，`PUT settings` 改其中任意几项（TTL 上限是第 5 步加的，见 4.5）。
-  - `GET status`：`atomdns.version`；`singbox.running`、`version`（Clash API 的 `/version`）、`in_sync`（运行中的文件是否就是当前状态生成的）、`host`；`last_apply`；`bindings`（绑定账本，第 5 步，见 4.5.1）；`warnings.empty_groups`；`nft`（4.6、9.4：`fakeip_range`、`ip_cidr`、表名 `table`、最近一次更新集合的结果 `sync`）。`GET apply` 返回 `last_apply` 和 `in_sync`，`POST apply` 用新密钥重新应用一次。`last_apply` 是 `{at, trigger, ok, changed, error?}`，`trigger` 是 `nodes`、`groups`、`final`、`settings`、`rules`、`apply`、`startup` 之一，在进程内跨配置重载保留。
+  - `GET status`：`atomdns.version`；`singbox.running`、`version`（Clash API 的 `/version`）、`in_sync`（运行中的文件是否就是当前状态生成的）、`host`；`last_apply`；`bindings`（绑定账本，第 5 步，见 4.5.1）；`warnings.empty_groups`。原来的 `nft`（集合的网段、表名、最近一次更新的结果）在 2026-11-12 nft 改成全部导入时删掉（9.4）。`GET apply` 返回 `last_apply` 和 `in_sync`，`POST apply` 用新密钥重新应用一次。`last_apply` 是 `{at, trigger, ok, changed, error?}`，`trigger` 是 `nodes`、`groups`、`final`、`settings`、`rules`、`apply`、`startup` 之一，在进程内跨配置重载保留。
   - 写操作都可以带 `version`（请求体，DELETE 用 `?version=`），和节点状态的版本比较。sing-box check 不通过 400，重载或确认失败 502（已回滚），一次应用进行中 409。
   - 写操作占用管理租约，`PUT settings` 例外：它自己拿租约，只覆盖 sing-box 的部分，因为改 mixed 端口要重新加载 AtomDNS 配置，而重新加载要等所有租约结束。
 - `dns`、`upstreams`、`rewrite`（`rust/native-host/src/atom_dns_api.rs`，第 6 步；`ddns` 第 6b 步删除，上游组的新建、改名、删除第 6b 步加上，见 4.8）：
@@ -438,10 +451,10 @@ DNS 和代理在同一台 VM 上。客户端的 DNS 指向这台 VM；FakeIP 网
 
 | 拓扑 | 流量怎么进来 | 说明 |
 |---|---|---|
-| 单网卡旁路由（和主路由在同一网段） | 主路由加一条静态路由：FakeIP 网段 → VM | 普通用户最常见的情况 |
-| 双网卡网关（LAN/WAN，参考 xray 那台机器） | VM 本身就是网关 | LAN 的全部流量都经过这台 VM：FakeIP 和 IP 规则网段进 sing-box，其余流量 NAT 后从 WAN 出去。安装器必须把这一点明确告诉用户。**[定]** |
+| 单网卡旁路由（和主路由在同一网段） | 主路由加静态路由：FakeIP 网段和要代理的网段 → VM | 普通用户最常见的情况 |
+| 双网卡网关（LAN/WAN） | VM 的 LAN 接主路由（用户的接法是主路由的 WAN2），主路由把 FakeIP 网段和要代理的网段走这个口 | 安装器提示：主路由需要把 FakeIP 网段和要代理的网段转到这台机器。TCP、UDP 进 sing-box，其余（ping 等）NAT 后从 WAN 出去。**[定]** |
 
-VM 上：TCP 用 redirect，UDP 用 TProxy，只处理目标是 FakeIP 网段和 IP 规则网段的流量。sing-box 自己发出去的流量目标是真实 IP，不会被再导回来。安装器检测网卡数量，生成对应的 nft 规则。具体规则写在单独的部署文档里，参考 xray 那台机器现有的规则。
+用户的部署（2026-11-12）：atom 在主路由后面，主路由只把 FakeIP 网段和需要代理的网段转给 atom，所以到达 atom 的转发流量都是要代理的。VM 上：TCP 用 redirect，UDP 用 TProxy，从 LAN 网卡进来、目标不是本机的 IPv4 TCP、UDP 全部导进 sing-box（两种拓扑一样，原来只导 FakeIP 网段和 IP 规则网段）；sing-box 里 FakeIP 按绑定或 Final 走，真实 IP 按 IP、端口、网络规则走，没命中走 Final。sing-box 自己发出去的流量走 `output`，不会被再导回来。安装器检测网卡数量，生成对应的 nft 规则。具体规则写在单独的部署文档里。
 
 ### 9.2 安装器（第 7 步）**[定]**
 
@@ -451,7 +464,7 @@ VM 上：TCP 用 redirect，UDP 用 TProxy，只处理目标是 FakeIP 网段和
 - **下载**（脚本）：配套包 `atom-<版本>-linux-amd64.tar.gz`（一个包：atomdns、补丁版 sing-box、`atom-installer`、`atom-webui.tar.gz`、默认配置、`manifest.json`），来源按顺序试：GitHub Release 直连，然后加速前缀（`gh-proxy.com`、`ghfast.top`、`ghproxy.net`，可用 `ATOM_MIRRORS` 改）。连接 6 秒没通，或速度低于 50 KB/s 持续 10 秒，就换下一个。包的 sha256 在发版时写进 `install.sh`，任何来源下载的都要校验，不过就丢弃换下一个（加速源是第三方）。`ATOM_PKG` 可以指定本地包或地址（开发和离线用）。第 7 步没有发布 Release：下载路径用本地模拟的"GitHub 不通、慢镜像、好镜像"验证过，没有真实访问过 GitHub 上的包；公共加速源的可用性会变（2026-11-11 探测：`gh-proxy.com`、`ghfast.top` 通，`ghproxy.net` 超时，`mirror.ghproxy.com` 连不上），上线前要再核。
 - **向导**（`web/index.html`，只放标签、错误和两处必须的提示：网关形态的警告，完成页的两步：主路由加静态路由 FakeIP 网段 → LAN IP、客户端 DNS 设为 LAN IP，两种拓扑一样）：
   1. 环境：系统（Debian 12+、Ubuntu 22.04+、x86_64、systemd、root）；53 端口被占时列出占用者并给按钮：systemd-resolved 的 stub 写 drop-in 关掉并把 `/etc/resolv.conf` 指到上游列表，其他 systemd 服务停止并禁用，不是服务的只提示；做完显示"已处理完毕"。
-  2. 网络：单网卡旁路由或双网卡网关，选网卡；选网关必须勾选"LAN 全部流量经过本机"；面板端口，默认 **80**。
+  2. 网络：单网卡旁路由或双网卡网关，选网卡；选网关必须勾选确认（警告 2026-11-12 改为"主路由需要把 FakeIP 网段和要代理的网段转到这台机器"）；面板端口，默认 **80**。
      - 双网卡网关另有"LAN 侧网关"和"客户端网段"（2026-11-12，用户在 atom 测试机上发现）：客户端不在 LAN 网段、经 LAN 侧的路由器过来时，本机的应答（DNS、redirect 和 TProxy 的回包、NAT 回来的包）会沿默认路由从 WAN 出去。向导按本机已有的、经 LAN 网卡的路由预填这两项；安装器在 `policy-route.sh` 里对每个网段写 `ip route replace <网段> via <LAN 侧网关> dev <LAN 网卡>`，随 `atom-dns.service` 每次启动加回。没用连接标记改道：atomdns 的 UDP 监听在通配地址、按路由选源地址，改道改不了已经选成 WAN 地址的源，DNS 仍然不通。都留空表示客户端都在 LAN 网段。
      - 所有权：网段原来就有同一网关、同一网卡的路由，就算机器自己的，卸载不删；网关不同就拒绝安装。安装器加的记在 `changes.json` 的 `routes`，拆网络时只删这些；重装时不再需要的旧路由当场删掉。
      - 面板只给 LAN（2026-11-12，用户定）：双网卡网关的 `atom-gateway.nft` 在 WAN 网卡上丢掉发往面板端口的 TCP；atomdns 仍监听所有地址，安装器和升级经 127.0.0.1 调用接口，LAN 地址变了也不受影响。完成页把浏览器带到 LAN 地址。实测（atom 测试机，0.1.3 → 0.1.4 升级）：从 LAN 打开面板 200、从 WAN 被拦，经 WAN 的 SSH 不受影响，客户端路由随升级保留。没处理：DNS 53 和 mixed 代理端口在 WAN 上照样开着。
@@ -485,9 +498,8 @@ v0 不做 IPv6 FakeIP，被代理的域名只返回 IPv4。
 
 具体规则、端口、标记和实测环境见 [deploy-nft.md](deploy-nft.md)。
 
-- **规则**：nft 表 `inet atom`，两个集合 `fakeip4`（FakeIP 网段）、`iprule4`（启用的 IP 规则的 IPv4 网段），`flags interval; auto-merge`。`prerouting` 上只看局域网网卡进来、目标不是本机地址的包：目标在集合里的 TCP redirect 到 7892，UDP TProxy 到 7893 并打标记 `0x233`；策略路由 `fwmark 0x233 lookup 233`，表 233 是 `local 0.0.0.0/0 dev lo`。双网卡网关另加一张 `ip atom_nat` 表（LAN → WAN 的 masquerade）和 `ip_forward = 1`；单网卡旁路由不需要 `ip_forward`。
+- **规则**（2026-11-12 改）：nft 表 `inet atom`，`prerouting` 上只看局域网网卡进来、目标不是本机地址（也不是广播、组播）的 IPv4 包：TCP 全部 redirect 到 7892，UDP 全部 TProxy 到 7893 并打标记 `0x233`；策略路由 `fwmark 0x233 lookup 233`，表 233 是 `local 0.0.0.0/0 dev lo`。双网卡网关另加一张 `ip atom_nat` 表（LAN → WAN 的 masquerade，现在只剩非 TCP、UDP 的包会用到，比如 ping）和 `ip_forward = 1`；单网卡旁路由不需要 `ip_forward`。原来按两个集合 `fakeip4`、`iprule4` 挑选目标，集合由 atomdns 维护（`singbox.nft_table`、`NftSets`、`sync_nft`、`status.nft`）；改成全部导入后这些都删了，规则文件每次加载整表替换，不再需要 atomdns 启动后填集合。
 - **sing-box 自己的流量**：nft 只挂 `prerouting`，本机进程的包走 `output`，不会被导回来，所以不设 `routing_mark`、也没有排除标记。本机进程访问 FakeIP 不处理。
-- **集合由 atomdns 维护**（用户选的，没有放进应用事务）：`atom_rules.yaml` 的 `singbox.nft_table: atom`（没有就不碰 nft），`singbox.nft` 是命令（默认 `[nft]`）。sing-box 应用成功后（FakeIP 网段和 IP 规则只随应用变化）、`POST apply` 后、每次启动和重新加载配置时，用 `nft -f` 执行一个脚本，两个集合 flush 后重新写入，一个事务。更新在应用锁里做，不会乱序。失败不回滚规则的改动，只记日志和 `status.nft.sync`（`{at, ok, error?, sets}`）。集合的内容取自正在运行的 sing-box 配置文件 `config.json`（FakeIP 服务器的 `inet4_range` 和路由规则里的 IPv4 `ip_cidr`），文件读不到时才用 atom 的状态；每次应用尝试（成功、应用失败回滚、保存失败补偿、之后编译失败）都在应用锁里以同步一次结束（codex 第 1、2 轮复审后改）。已知限制（codex 第 3 轮，主会话决定不改代码）：补偿时旧文件写回成功、但重载命令失败，sing-box 仍在跑新配置，而 nft 按写回的旧文件更新；要同时出现保存失败和重载失败才会发生，接口会报"已写回旧配置，但重载后没有确认"，`in_sync` 显示不一致，再应用一次（或 `POST apply`）就恢复。见 deploy-nft.md 第 8 节。规则文件里的集合是空的，每次加载都整表替换，所以 atomdns 的单元先 `ExecStartPre` 加载规则文件和策略路由，启动后自己填集合（安装器的写法，第 7 步）。实现在 `atom_singbox.rs`（`NftSets`、`nft_script`、`sync_nft`）和 `atom_rules/singbox.rs`（`sync_nft`、`last_nft`）。
 - **UDP 53 的写回**（联调发现，用户选的修法）：sing-box 的 TProxy 回包要用 IP_TRANSPARENT 绑定"原目标地址:端口"，atomdns 在 `*:53` 监听且没设 `SO_REUSEADDR` 时，客户端发往 FakeIP 或 IP 规则地址的 UDP 53（比如 IP 规则里有 8.8.8.8，客户端直接问它）绑定报 `EADDRINUSE`，回包发不出去。改为 atomdns 在通配地址（`[::]`、`0.0.0.0`）上的 UDP 监听设 `SO_REUSEADDR`（`rust/native-host/src/bind.rs`）。代价：同一台机器上再起一个监听通配地址的 atomdns，不会再报端口被占用，而是共用 53 端口；具体地址的监听照旧拒绝重复绑定。
 - **拓扑**：单网卡旁路由和双网卡网关都在 netns 里实测过（deploy-nft.md 第 7 节）。单网卡时主路由只看到去程，转发链里"丢弃 invalid"的规则可能丢包，这一点没有实测条件，文档给了两种处理办法。
 

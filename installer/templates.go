@@ -18,51 +18,41 @@ func nftList(names []string) string {
 	return strings.Join(q, ", ")
 }
 
-// renderNft is deploy-nft.md 3.1: the FakeIP and IP-rule destinations from the LAN go to sing-box.
+// renderNft is deploy-nft.md 3.1: every IPv4 TCP and UDP connection from the LAN that is not for this
+// machine goes to sing-box. The main router only sends this machine what is to be proxied (the FakeIP
+// range and the networks to proxy), so sing-box decides all of it: a FakeIP by its binding or Final, a
+// real address by the IP, port and network rules, else Final.
 func renderNft(lan []string) (string, error) {
 	if err := checkIfaceNames(lan); err != nil {
 		return "", err
 	}
 	l := nftList(lan)
 	return fmt.Sprintf(`#!/usr/sbin/nft -f
-# atom: send FakeIP and IP-rule destinations from the LAN to sing-box. Written by atom-installer.
+# atom: send TCP and UDP from the LAN to sing-box. Written by atom-installer.
 table inet atom
 delete table inet atom
 table inet atom {
-	# Filled by atomdns (nft -f, one transaction) at start and after each application.
-	set fakeip4 {
-		type ipv4_addr
-		flags interval
-		auto-merge
-	}
-	set iprule4 {
-		type ipv4_addr
-		flags interval
-		auto-merge
-	}
-
 	# TCP: redirect to sing-box redirect-in (7892).
 	chain prerouting_tcp {
 		type nat hook prerouting priority dstnat; policy accept;
 		iifname != { %[1]s } return
-		fib daddr type local return
-		ip daddr @fakeip4 meta l4proto tcp redirect to :7892
-		ip daddr @iprule4 meta l4proto tcp redirect to :7892
+		fib daddr type { local, broadcast, multicast } return
+		meta nfproto ipv4 meta l4proto tcp redirect to :7892
 	}
 
 	# UDP: TProxy to sing-box tproxy-in (7893); the mark sends it to table 233 (local).
 	chain prerouting_udp {
 		type filter hook prerouting priority mangle; policy accept;
 		iifname != { %[1]s } return
-		fib daddr type local return
-		ip daddr @fakeip4 meta l4proto udp tproxy ip to :7893 meta mark set %[2]s accept
-		ip daddr @iprule4 meta l4proto udp tproxy ip to :7893 meta mark set %[2]s accept
+		fib daddr type { local, broadcast, multicast } return
+		meta nfproto ipv4 meta l4proto udp tproxy ip to :7893 meta mark set %[2]s accept
 	}
 }
 `, l, fwmark), nil
 }
 
-// renderGatewayNft is deploy-nft.md 3.2: everything else from the LAN is NATed out of the WAN. The panel is
+// renderGatewayNft is deploy-nft.md 3.2: what is neither TCP nor UDP (ping) is forwarded and NATed out of
+// the WAN. The panel is
 // for the LAN only: its port is closed on the WAN (atomdns still listens on every address, so the installer
 // reaches it on 127.0.0.1 and a changed LAN address does not matter).
 func renderGatewayNft(lan []string, wan string, panelPort int) (string, error) {
@@ -73,7 +63,7 @@ func renderGatewayNft(lan []string, wan string, panelPort int) (string, error) {
 		return "", fmt.Errorf("invalid panel port %d", panelPort)
 	}
 	return fmt.Sprintf(`#!/usr/sbin/nft -f
-# atom, dual-NIC gateway only: everything else from the LAN is forwarded and NATed out of the WAN. Written by atom-installer.
+# atom, dual-NIC gateway only: what is neither TCP nor UDP from the LAN is forwarded and NATed out of the WAN. Written by atom-installer.
 table ip atom_nat
 delete table ip atom_nat
 table ip atom_nat {
@@ -134,7 +124,7 @@ func (r ClientRoute) check() error {
 	return checkIfaceNames([]string{r.Dev})
 }
 
-// renderDNSUnit is deploy-nft.md 4: load the rules and the routing first, atomdns then fills the sets.
+// renderDNSUnit is deploy-nft.md 4: load the rules and the routing before atomdns starts.
 func renderDNSUnit(p Paths, nftBin, sysctlBin string, gateway bool) string {
 	var pre strings.Builder
 	fmt.Fprintf(&pre, "ExecStartPre=%s -f %s\n", nftBin, p.Etc("atom.nft"))
