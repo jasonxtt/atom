@@ -32,7 +32,7 @@ FakeIP 流量 ─>│ FakeIP 还原域名 → 绑定的出口 / route.final → 
 
 | 组件 | 来源 | 职责 |
 |---|---|---|
-| atom | `atom/atomdns`：从 `jasonxtt/atomdns` main 分出 **[定]** | DNS 决策、规则表、控制面、管理 API、WebUI 托管 |
+| atom | `atom/atomdns`：从 `jasonxtt/atomdns` main 分出 **[定]**；2026-11-12 合入上游 v0.6.6（DoH over HTTP/3、DoQ 上游） | DNS 决策、规则表、控制面、管理 API、WebUI 托管 |
 | sing-box | `atom/sing-box`：分支 `atom/fakeip-outbound`，基于 v1.14.4 **[定]** | FakeIP、出口绑定、节点协议、节点组选择和测速 |
 | 安装器 | `atom/installer` **[定]** | 一条命令加网页向导：安装两个程序和 systemd 服务，配置 nft、路由和 `ip_forward`，升级和卸载（9.2） |
 
@@ -356,7 +356,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 | `dns_mode` | 固定为 FakeIP，RealIP 的代码路径删除 |
 | `cn_fakeip` | 固定为关 |
 | FakeIP 上游（`nocnfake`） | 固定为本机 sing-box 的 `dns-in`（`udp://127.0.0.1:6666`）。`PUT upstreams/nocnfake` 拒绝修改它（第 6 步前是 `POST /api/v1/upstream/config`），`settings.json` 里存的列表也被忽略 |
-| 国外 DNS 走的代理（`$main_proxy`） | 默认是 `socks5://127.0.0.1:7890`（`settings.yaml` 里写作 `addr: "127.0.0.1:7890"`），即本机 sing-box 的 mixed 入站，经 Final 出去。可以按上游单独关闭。UDP 上游不能走 SOCKS（AtomDNS 现有规则），所以默认的国外上游用 DoH/DoT/TCP。不用 nft 在 OUTPUT 链导流：那样要处理本机流量、同步上游 IP 集合，还要防回环。**[定]** |
+| 国外 DNS 走的代理（`$main_proxy`） | 默认是 `socks5://127.0.0.1:7890`（`settings.yaml` 里写作 `addr: "127.0.0.1:7890"`），即本机 sing-box 的 mixed 入站，经 Final 出去。可以按上游单独关闭。UDP 上游不能走 SOCKS（AtomDNS 现有规则），所以默认的国外上游用 DoH/DoT/TCP。DoH over HTTP/3 和 DoQ 走 QUIC（UDP），同样不能走 SOCKS，选了它们的条目直接连上游（2026-11-12 合入上游 v0.6.6）。不用 nft 在 OUTPUT 链导流：那样要处理本机流量、同步上游 IP 集合，还要防回环。**[定]** |
 | 专属分流组 | 删除。第 1 步在产品配置里删掉（不 include `special_groups.yaml`，主流程去掉 `$special_upstream_matcher`、`$sequence_special`）；第 6 步删掉 Rust 代码（`config/standard_groups.rs`、`standard_groups_api.rs`、编译和应用里的组状态、派生文件、孤儿清理和 health 的 `pending_cleanup`）。配置再 include `special_groups.yaml` 时按普通 include 处理（文件不存在就报错） |
 | `realiplist`、`cnfakeipfilter` | 删除（"代理但返回真实 IP"在 FakeIP 网段分流架构下等于悄悄直连）**[定]**。核实过的语义：`realiplist`（mark 9）在所有名单里优先级最高，A/AAAA 和其他类型都问国外 DNS（经 `main_proxy`），返回国外真实 IP，流量不进 sing-box；`cnfakeipfilter`（mark 10）只在 `cn_fakeip` 开启时生效。两个名单、mapper 条目、名单文件、分流分支和只给 realiplist 用的 `sequence_google_exit` 都已删除。以后需要"国外 DNS 解析后直连"，在规则表里表达 |
 | AtomDNS 原有的在线更新（程序、配置包、WebUI） | 删除，改为产品自己的更新渠道。第 1 步删掉了整个 `update` 模块（含 `update-guard` 子命令、中断恢复、`/api/v1/update/*`、`/api/v1/config/export`），容器模式（`ATOMDNS_CONTAINER`，用镜像里的配置包初始化卷）依赖配置包，一起删了；`docker/` 和发布脚本还没清理 |
@@ -372,7 +372,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 第 6 步定下的 **[定]**：AtomDNS 这一侧的开放项不进 `settings`，单独两个资源。原因：`settings` 写 `atom_proxy.json`、走 sing-box 应用事务；这些项写 `webinfo/settings.json`、发布 AtomDNS 的新一代配置，放在一个 PUT 里会一半成功一半失败。
 
 - `GET/PUT dns`：`core_mode`、`block_qtypes`（SOA/PTR/HTTPS）、`block_aaaa`、`prefer_v4`、`full_cache`（界面叫"未命中规则的缓存"）、`lazy_cache`（"上游应答缓存"）、`block_empty`（空结果屏蔽，2026-11-12 开放）（只开放开关，缓存容量用 YAML 的默认值）、`ecs`（国外查询带的 ECS 地址，空串恢复默认）、`learning`（`enabled`、`remember_direct`、`remember_proxy`、`no_v4`、`no_v6`；关掉的学习名单随即清空）。改 `core_mode` 会启动一次 requery。
-- `GET upstreams`、`PUT upstreams/{tag}`：国内（`domestic`）、国外（`foreign`）、国外带 ECS（`foreignecs`）三组上游，条目是 AtomDNS 原有的上游条目（`use_proxy` 就是 7.1 说的按上游关闭代理）；FakeIP 组（`nocnfake`）不出现，也改不了。至少保留一个启用的条目；空列表恢复配置的默认列表。
+- `GET upstreams`、`PUT upstreams/{tag}`：国内（`domestic`）、国外（`foreign`）、国外带 ECS（`foreignecs`）三组上游，条目是 AtomDNS 原有的上游条目（`use_proxy` 就是 7.1 说的按上游关闭代理）；`protocol` 可以是 `udp`、`tcp`、`tls`/`dot`、`https`/`doh`、`h3`、`quic`/`doq`，DoH 加 `enable_http3: true` 就是 DoH over HTTP/3（和 `h3` 等价，界面上是 DoH 的 HTTP/3 开关，存成 `https` + `enable_http3`），`quic` 是 DoQ；这两种不能开 `use_proxy`（400）（2026-11-12 合入上游 v0.6.6）；FakeIP 组（`nocnfake`）不出现，也改不了。至少保留一个启用的条目；空列表恢复配置的默认列表。
 - 这两个资源不带 `version`，后写的覆盖先写的。
 - 其余开关不开放；`client_routing` 删除，改用规则表的客户端条件（4.2）。
 
