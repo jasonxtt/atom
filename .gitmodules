@@ -1,0 +1,8 @@
+[submodule "atomdns"]
+	path = atomdns
+	url = https://github.com/jasonxtt/atom-core.git
+	branch = atom/main
+[submodule "sing-box"]
+	path = sing-box
+	url = https://github.com/jasonxtt/sing-box.git
+	branch = atom/fakeip-outbound

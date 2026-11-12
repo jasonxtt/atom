@@ -1,6 +1,6 @@
 # atom 设计文档 v0
 
-状态：v0 已审，第 12 节的问题已答复；第 2 步实现时新定的事项写回了第 3、4、8 节，第 3 步的写回了第 4.6、5、6、8 节，第 4 步的写回了第 4.6、6、7.3、9.4、11 节，第 5 步的写回了第 4.5、7.2、8、11 节，第 6 步（6a）的写回了第 3.2、4.4、4.5.1、7.1、7.2、8、11 节，第 7 步的写回了第 6、7.1、9.2、10、11 节；2026-11-12 的规则条件和 nft 改动写回了第 3.3、4.2、4.6、6、7.3、8、9.1、9.2、9.4 节。日期：2026-11-12。
+状态：v0 已审，第 12 节的问题已答复；第 2 步实现时新定的事项写回了第 3、4、8 节，第 3 步的写回了第 4.6、5、6、8 节，第 4 步的写回了第 4.6、6、7.3、9.4、11 节，第 5 步的写回了第 4.5、7.2、8、11 节，第 6 步（6a）的写回了第 3.2、4.4、4.5.1、7.1、7.2、8、11 节，第 7 步的写回了第 6、7.1、9.2、10、11 节；2026-11-12 的规则条件和 nft 改动写回了第 3.3、4.2、4.6、6、7.3、8、9.1、9.2、9.4 节；2026-11-13 开源写回了第 2、10 节。日期：2026-11-13。
 
 标记说明：**[定]** 表示已经和用户确认；**[建议]** 是我的提议，等审阅；**[待定]** 表示还要讨论。
 
@@ -32,8 +32,8 @@ FakeIP 流量 ─>│ FakeIP 还原域名 → 绑定的出口 / route.final → 
 
 | 组件 | 来源 | 职责 |
 |---|---|---|
-| atom | `atom/atomdns`：从 `jasonxtt/atomdns` main 分出 **[定]**；2026-11-12 合入上游 v0.6.6（DoH over HTTP/3、DoQ 上游） | DNS 决策、规则表、控制面、管理 API、WebUI 托管 |
-| sing-box | `atom/sing-box`：分支 `atom/fakeip-outbound`，基于 v1.14.4 **[定]** | FakeIP、出口绑定、节点协议、节点组选择和测速 |
+| atom | `atom/atomdns`（仓库 `jasonxtt/atom-core`）：从 `jasonxtt/atomdns` main 分出 **[定]**；2026-11-12 合入上游 v0.6.6（DoH over HTTP/3、DoQ 上游） | DNS 决策、规则表、控制面、管理 API、WebUI 托管 |
+| sing-box | `atom/sing-box`（仓库 `jasonxtt/sing-box`）：分支 `atom/fakeip-outbound`，基于 v1.14.4 **[定]** | FakeIP、出口绑定、节点协议、节点组选择和测速 |
 | 安装器 | `atom/installer` **[定]** | 一条命令加网页向导：安装两个程序和 systemd 服务，配置 nft、路由和 `ip_forward`，升级和卸载（9.2） |
 
 - 两个进程之间只通过 DNS 和 HTTP 通信，不共享内存，也不用 cgo。
@@ -511,17 +511,20 @@ v0 不做 IPv6 FakeIP，被代理的域名只返回 IPv4。
 ## 10. 仓库与版本
 
 ```text
-atom/
-  README.md
-  docs/        设计、补丁说明、API 规范、部署文档
-  atomdns/     AtomDNS fork（独立 git 仓库，分支 atom/main；自带的 YAML 配置在 atomdns/config/）
-  sing-box/    sing-box fork（独立 git 仓库，分支 atom/fakeip-outbound）
+atom/          jasonxtt/atom
+  README.md  LICENSE
+  docs/        设计、补丁说明、部署文档
+  atomdns/     子模块 → jasonxtt/atom-core，分支 atom/main（自带的 YAML 配置在 atomdns/config/）
+  sing-box/    子模块 → jasonxtt/sing-box，分支 atom/fakeip-outbound
   installer/   安装器（Go 程序 + 一条命令的脚本 + 打包脚本）
 ```
 
 - fork 自带的 YAML 配置放在 `atomdns/config/`：从 `jasonxtt/file` 的 `atomdns/config/full/config_rust`（v0.6.4，schema 7）复制过来，锁定改动直接改这份，不动 file 仓库，改动记在 `atomdns/config/README.md`。**[定]**
-- `atom/` 建一个新仓库，先只在本地用 git，差不多了再推到 GitHub。`atomdns/` 和 `sing-box/` 是独立的 git 仓库，在 `atom` 的 `.gitignore` 里排除。**[定]**
-- 三个组件按"配套版本"一起发布，安装器和在线更新只认配套的组合。**[建议]**
+- **开源（2026-11-13）[定]**：三个仓库都公开，都是 GPL-3.0；两个 fork 保留原有的 LICENSE，是衍生作品。
+  - AtomDNS fork 放在新仓库 `jasonxtt/atom-core`（GitHub 不能 fork 自己的仓库），内容是 `jasonxtt/atomdns` 的 `atom/main` 分支和它的完整历史；程序名、服务名不变（`atomdns`、`atom-dns.service`）。本地 `atomdns/` 的 `origin` 仍指 `jasonxtt/atomdns`，用来跟进上游，remote `atom` 指 atom-core。上游的版本标签不推到 atom-core。
+  - sing-box fork 是 GitHub 上 `SagerNet/sing-box` 的 fork `jasonxtt/sing-box`，分支 `atom/fakeip-outbound`。本地 `sing-box/` 的 `origin` 是上游，remote `atom` 是 fork。
+  - atom 用子模块固定两个 fork 的提交，子模块的提交就是"配套版本"。`git clone --recursive` 拿到全部源码。
+- **版本 [定]**：配套包的版本就是 atom 的版本，2026-11-13 开源时从 0.1.0 重新开始（之前的 v0.1.0～v0.1.2 测试 Release 和标签删掉，测试机上用过的 0.1.3～0.1.16 只在本地打过包）。Release 的标签指向包含子模块的 atom 提交；包里的 `manifest.json` 记录 atomdns、sing-box、安装器三处的提交。安装器只认配套的组合，不单独升级某个组件。
 
 ## 11. 实施顺序 **[建议]**
 
