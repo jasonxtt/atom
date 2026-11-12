@@ -405,7 +405,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 
 | 资源 | 操作 |
 |---|---|
-| `rules` | 列表、新建、修改、删除、`POST rules/move`（拖动）、`POST rules/test`（输入域名，看会命中哪条规则） |
+| `rules` | 列表、新建、修改、删除、`POST rules/move`（拖动）、`POST rules/test`（输入域名，看会命中哪条规则）、`POST rules/dryrun`（一次查询的完整推演，见下） |
 | `rulesets` | 列表、新建（远程 URL / 本地列表）、修改、刷新（远程和内置）、删除 |
 | `nodes` | 列表、导入（`format: json|yaml|link`，可以批量）、修改、删除 |
 | `groups` | 列表、新建、修改、删除（"默认代理"不可删）、`POST groups/{id}/select`、`POST groups/{id}/delay` |
@@ -423,7 +423,12 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
   - `GET rules` 返回 `{version, rules}`。规则的 JSON：`{id, enabled, remark, match: {domain, suffix, keyword, regex, ruleset, client, ip_cidr}, action: {type: proxy, group_id} | {type: direct} | {type: block}}`。
   - `POST rules` 新建，可以带 `before_id`/`after_id` 指定位置，默认放最后。`PUT rules/{id}` 整条替换。`DELETE rules/{id}?version=N` 删除。
   - `POST rules/move {id, before_id | after_id, version}` 拖动，`version` 必填。其他写操作的 `version` 可选，带了就检查。版本不对时返回 409，错误体里带当前 `version`。每次规则变化，版本加 1。
-  - `POST rules/test {domain, client?}` 返回命中的规则（`matched`、`index`、`action`、`group_id`、`rule`），没命中时返回 `{matched: false, fallthrough: "original"}`，即交给原判断。只看规则表，不模拟系统固定项和原判断。规则页的测试没命中时显示"交给原判断（DNS）"，并标亮列表底部的原判断一行（第 11 节第 9 条）。
+  - `POST rules/test {domain, client?}` 返回命中的规则（`matched`、`index`、`action`、`group_id`、`rule`），没命中时返回 `{matched: false, fallthrough: "original"}`，即交给原判断。只看规则表，不模拟系统固定项和原判断。规则页原来用它测试域名，2026-11-12 改用 `rules/dryrun`；接口保留，界面不再调用（它算内置规则集标记时读学习结果，会给学到的条目记一次命中，没改）。
+  - `POST rules/dryrun {domain, client?, qtype?: A|AAAA}`（2026-11-12，`rust/native-host/src/atom_dryrun.rs`）**[定]**：推演"现在重新判断一次会怎样"，不留痕迹。做法：用运行中这一代配置编译好的入口序列（`sequence_6666`）和真实的状态机跑一遍，匹配器、fixture（mapper、规则表、`fast_mark` 等）都是真的，顺序就是 YAML 的顺序；只替换主机侧对外部操作的处理：缓存一律跳过（不读不写，记下会经过哪些缓存）；`route_learn` 只算"会学什么"，不学；`top_domains` 不记；重写照插件的规矩（IP 目标同族给地址、否则空应答；域名目标经它的序列 `$sequence_local_in` 照样不留痕迹地解析，固定服务器的直接去问）；FakeIP 上游（sing-box）不问，不发 SET/CLEAR、不进绑定账本，按空 NOERROR 继续；其他上游照真实流程发出去（探测、直连的上游，ECS 一样，时限和前台查询一样），绕过缓存，用私有的尝试记录和私有的一份上游轮转计数（从当前值起，照常前进；真实查询的轮转不动），不进查询日志、统计和上游计数；状态机运行期间 route_learner 的查找是只读的（不记命中、不删过期条目，`route_learner::peeking`）。`prefer_ipv4` 照 `run_preference`：AAAA 时先看记住的证据，没有就再推演一次 A（这次的步骤不显示；真实流程两支并发、原分支结束后再等 500ms，推演里先后跑，A 那支限时"原分支的耗时 + 500ms"），A 有记录或会拿到 FakeIP 就是空应答，什么都不记住。规则表逐条的结果在规则表 fixture 运行的同一步里算，和它用的是同一张表。为了列步骤，`sequence-core` 的 `StepTrace` 加了一个默认空的 `rule(sequence, pc, matched)` 回调。
+    - 返回：`steps`（重写、类型屏蔽、IPv6 屏蔽、AAAA 时的 IPv4 优先、规则表（到命中那条为止逐条的 `hit/miss/off/singbox`）、原判断各支（A 只列无 V4，AAAA 只列无 V6）、探测（上游、ECS、应答的 IP、"探测结果，未学习"、`would_learn`）），每步 `hit/miss` 和简短原因（第一个不成立的条件：开关关、查询类型不符、不在名单、没有记录）；`branch`：决定结果的原判断分支（和 `original.ts` 的 key 一致）；`conclusion`：`direct`（上游组、应答的上游、ECS、地址、会经过的缓存）、`proxy`（`SET 组` 或 `CLEAR`，AAAA 时 sing-box 不读指令，不对照绑定；用 Clash API 的 `now` 把出口展开到节点，`chain`）、`block`、`empty`（rcode），以及上游失败时的 `fail`；`binding`：绑定账本里这个域名的记录、这次判断会发的指令（直连、屏蔽规则按账本重算的规矩是 SET direct / SET block，带客户端条件的规则不算；原判断的直连和空应答不发；账本里没有记录时，只有代理到组才算不一致），不一致时 `match: false`。
+    - 和真实流程的出入（已知）：探测和直连查询每次都真的问上游，和真实查询可能拿到不同的应答（上游本身的变化、多个上游里先答的那个）；主机名上游（地址写域名、没有 `dial_addr`）的引导解析结果和到上游的连接，推演和真实查询共用，不隔离（2026-11-13，用户定，记为已知限制）：共用的是上游服务器本身的地址和连接，不是被测域名的 DNS 应答，不影响判断结果。不支持 `fallback`（atom 的配置里没有），遇到就报错。
+    - 一致性测试 `atom_dryrun_tests.rs`：用仓库里实际的 `config_custom.yaml`、`process_*.yaml`、`forward_1.yaml`、`route_learner.yaml`、`flags.yaml`、`cache.yaml`，数据集合和上游换成本机假服务，对规则代理、规则直连（含指定上游组、不缓存）、客户端规则、geosite 国内外、探测（国内 IP、`direct_ip`、国外 IP、无 IP）、学到以后的记忆代理/直连、AAAA、重写、安全模式（ECS）、IPv6 屏蔽逐个先推演再真实查询，结论和真实结果（地址、sing-box 收到的指令）一致；推演前后缓存条目数、学习条目和命中数、热门域名、绑定账本、sing-box 收到的查询都不变。
+    - 规则页的测试框：域名、客户端 IP（可选）、A/AAAA；结果是结论卡片（直连/代理/屏蔽/空应答、上游或出口链"兜底分组 → 默认代理 → 节点"、缓存、绑定，不一致时标"和推演不一致 · 客户端还没重新查询"）加步骤列表（规则表只展开命中那条，其余折叠）；命中规则时标亮规则行，交给原判断时自动展开底部原判断一行并标亮对应分支（第 11 节第 10 条）。
   - `GET rulesets` 列出内置集合（`type: builtin`）和自定义规则集；`GET rulesets/{id}` 带上列表内容。`POST rulesets` 的请求体是 `{name, type: remote, url, format?, category?}` 或 `{name, type: local, rules}`。`PUT rulesets/{id}` 改名、改地址或替换本地列表。`DELETE rulesets/{id}` 删除。`POST rulesets/{id}/refresh` 重新下载。
   - 错误体都是 AtomDNS 现有的 `{"error": "..."}`。写操作和 `rulesets` 的下载都占用管理租约，和设置、配置重载互斥（租约只防配置重载，不让写操作排队）。
   - 带 `client` 的代理规则返回 400（4.2）。下载期间规则集的来源被改掉，或者之后又开始了一次下载，返回 409，这次结果丢弃。修改已生效但缓存没清干净时返回 500（4.7）。
@@ -548,6 +553,8 @@ atom/
    - 规则列表最后固定一行"未命中以上规则"，带 DNS 标签：这部分是 AtomDNS 的 DNS 判断（3.1 第 3 层），不是 sing-box 的路由规则。不能拖动、编辑、删除。展开后按配置里的实际顺序列出 A/AAAA 查询的分支（`sequence_6666` 规则表之后、`process_listed.yaml`、`process_v4/v6.yaml`）：学到的无 V4 / 无 V6 → 空应答；`geosite_no_cn` → FakeIP · 代理 · 兜底分组；`geosite_cn` → 直连 · 国内 DNS；记忆代理 → FakeIP · 代理 · 兜底分组；记忆直连 → 直连（兼容模式国内 DNS，安全模式国外 DNS）；其余 → 按核心模式探测（兼容国内 DNS，安全国外 DNS）：国内 IP 或 `direct_ip` 直连，其他 IP FakeIP · 代理 · 兜底分组，上游没有给 IP 的不给地址（AAAA 学"无 V6"；兼容模式下 AAAA 失败也走 FakeIP，sing-box 对 AAAA 不给地址），并学习。注意 `geosite_no_cn` 排在 `geosite_cn` 前面、记忆代理排在记忆直连前面，这是 YAML 的顺序。
    - 开关按 `GET dns` 的实际状态显示：空应答那一支要"空结果屏蔽"开着、对应学习类别生效；学习类别生效 = 总开关且类别开关（和 `route_learner` 编译时一样）；关掉的分支标"关"。跳转：geosite → 规则集页对应的默认规则集（`/rules/sets?set=<id>`），学习类分支 → DNS 高级设置的域名学习，其余 → 核心模式（`/dns/settings?at=learning|mode`）。代码 `webui/src/original.ts`（测试 `tests/original.test.mjs`）。
    - 新建条件的规则集选择框只列 MetaCubeX 和 blackmatrix7 的目录条目，不再列默认规则集（`adguard`、`geosite_cn`、`geosite_no_cn`、`cuscn`、`cusnocn`）。已经引用默认规则集的规则（默认规则表第 2～4 条）照常显示、编辑、保存，可以删掉这个条件；删掉以后不能再从选择框选回来（用户接受：广告规则改用目录里的规则集）。
+
+10. **规则页：测试域名改成 dry-run**（2026-11-12，用户定）**[定]**：测试框调用 `POST rules/dryrun`（第 8 节），按真实流程的顺序列出每一步命中与否和原因，给出结论；代理时把组按 sing-box 当前选中项展开到节点；对照绑定账本。探测真的查上游但不留痕迹，不读不写缓存。代码 `webui/src/dryrun.ts`（测试 `tests/dryrun.test.mjs`）、`RulesPage.vue`。
 
 每一步都单独验收后再进行下一步。实施顺序已认可。**[定]**
 
