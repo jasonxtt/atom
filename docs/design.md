@@ -127,7 +127,7 @@ Rule {
 
 界面的叫法（2026-11-12，用户定）：规则编辑页的条件分"内置规则集"（MetaCubeX、blackmatrix7 目录，原来叫"规则源"）、"自定义规则集"和"自定义条件"（域名、目标 IP 网段、目标端口、网络、客户端，原来叫"匹配器"）；规则集页原来叫"内置"的 `cuscn`、`cusnocn`、`adguard`、`geosite_cn` 等叫"默认规则集"。
 
-粘贴 sing-box 规则（2026-11-12）：规则编辑页可以粘贴一条 sing-box 无头规则 JSON，按字段拆进条件：`domain`、`domain_suffix`、`domain_keyword`、`domain_regex` 进域名条件（`domain_suffix` 以点开头的条目只匹配子域名，这里表示不了，报错；值里有换行等控制字符也报错，因为表单按行拆条目；已经有客户端条件时再粘贴 `source_ip_cidr` 报错，一条规则只有一块客户端条件），`ip_cidr`、`port`、`port_range`、`network` 进对应条件，`source_ip_cidr` 进客户端条件。其他字段（`rule_set`、`protocol`、`process_*`、`invert`、需要嗅探的字段等）直接报错，不静默忽略。在前端拆（`webui/src/singboxRule.ts`），接口不变：拆出来的条件照常保存、照常由后端校验。不开嗅探，不加需要嗅探的条件。
+粘贴 sing-box 规则：做过（规则编辑页粘贴一条无头规则 JSON，在前端拆成条件），用户看过界面后觉得碍眼，2026-11-12 去掉了。不开嗅探，不加需要嗅探的条件。
 
 客户端条件取反（第 6 步，用户定的）**[定]**：`match.client_invert` 为 true 时，"客户端不在 `client` 列表内"才算命中。只能和 `client` 一起用，单独给返回 400；和域名条件之间仍然是"与"；动作仍然只能是直连或屏蔽。一条规则一个动作，不命中就继续往下匹配；不做"全部代理"。AtomDNS 原来的两种客户端分流模式用规则写：
 
