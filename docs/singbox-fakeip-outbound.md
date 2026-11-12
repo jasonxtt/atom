@@ -8,7 +8,7 @@ AtomDNS 决定域名走哪个出口，把结果放在发给 sing-box FakeIP DNS 
 
 - fork 目录：`sing-box/`（上游 `SagerNet/sing-box` 的 clone）
 - 分支：`atom/fakeip-outbound`，基于 tag `v1.14.4`（`c005f353`）
-- 改动：8 个文件，另有 5 个测试文件
+- 改动：9 个文件，另有 6 个测试文件
 
 | 文件 | 改动 |
 |---|---|
@@ -19,6 +19,7 @@ AtomDNS 决定域名走哪个出口，把结果放在发给 sing-box FakeIP DNS 
 | `dns/transport/fakeip/memory.go` | 内存存储增加 `outboundCache`，`FakeIPReset` 一并清空 |
 | `experimental/cachefile/fakeip.go` | 新 bucket `fakeip_outbound`，`FakeIPReset` 一并删除 |
 | `cmd/sing-box/cmd_run.go` | 重载循环提成 `runLoop`；新配置启动失败时用上一份配置重建实例，进程不退出（见下文） |
+| `experimental/clashapi/cache.go` | `/cache/fakeip/flush` 经 FakeIP store 的 `Reset()` 清（拿同一把锁），不再绕过它直接清 cache file；store 不用 cache file 时照上游另清 cache file（2026-11-12，codex 第 3 轮） |
 | `route/route.go` | 还原 FakeIP 时查绑定；FakeIP 连接一律跳过 `route.rules`：有绑定时 TCP/UDP 严格按标签选出口，没有绑定走 `route.final`，PreMatch 交回常规路径；`resolve` 动作解析出 FakeIP 时按域名查绑定（`resolvedToFakeIP`，见下文"代理入站"） |
 
 上游 v1.14.4 已经对 FakeIP transport 关闭了 DNS client 缓存（`dns/router.go` 中 `isFakeIP` 时 `DisableCache = true`），所以不需要 PR15 契约里对 `dns/client.go` 的改动。
@@ -45,7 +46,7 @@ AtomDNS 决定域名走哪个出口，把结果放在发给 sing-box FakeIP DNS 
 - 规则变化后，AtomDNS 的绑定账本会主动给有变化的域名发 SET 或 CLEAR（不用等客户端重新查询，见 [design.md](design.md) 4.5.1）；sing-box 这边不用改。
 - 绑定写失败时（比如 cache file 写不进去），这次查询不返回应答（报错，客户端看到的是 SERVFAIL 或超时），已有绑定保持不变。原来是只记 warning、照常应答，但 AtomDNS 的绑定账本把正常应答当作"绑定已生效"，之后不会再发；改成报错后，账本保留旧值，下次重算再发（atom 第 5 步 codex 第 2 轮复审后改）。不带指令的查询不受影响。
 - 开启 `experimental.cache_file` 的 `store_fakeip` 后，绑定可以跨重启保留。
-- 地址回收（2026-11-12）：FakeIP 地址池循环复用、把某个地址分给新域名时，删掉原来占着这个地址的旧域名的绑定（内存和 cache file 都一样）。只删映射到这个地址的旧域名；旧域名还有另一族的地址（A 和 AAAA 共用一个绑定）时不删。为了不误删正在写的绑定，FakeIP DNS 处理一次查询时，写绑定和分配地址在同一把锁里做完：否则另一个查询可能在"旧域名刚写好 SET"和"旧域名重新分配地址"之间回收它的地址、删掉刚写的绑定，旧域名就会拿着地址却没有绑定（走 Final 而不是规则指定的组）。代价是 FakeIP DNS 的查询串行处理。旧域名的客户端下一次查询时，AtomDNS 照常带指令（代理规则的查询不经过缓存），绑定随新地址重建；AtomDNS 的绑定账本不知道这次删除，账本里的旧值最多让下一次重算少发一次相同的指令，不影响新查询。
+- 地址回收（2026-11-12）：FakeIP 地址池循环复用、把某个地址分给新域名时，删掉原来占着这个地址的旧域名的绑定（内存和 cache file 都一样）。只删映射到这个地址的旧域名；旧域名还有另一族的地址（A 和 AAAA 共用一个绑定）时不删。为了不误删正在写的绑定，FakeIP DNS 处理一次查询时，写绑定和分配地址在同一把锁里做完：否则另一个查询可能在"旧域名刚写好 SET"和"旧域名重新分配地址"之间回收它的地址、删掉刚写的绑定，旧域名就会拿着地址却没有绑定（走 Final 而不是规则指定的组）。代价是 FakeIP DNS 的查询串行处理。清空（`Store.Reset()`，包括 Clash API 的 `/cache/fakeip/flush`）也拿这把锁，不会落在一次查询的"写绑定"和"分配地址"之间。原来 flush 直接清 cache file；现在没开 `store_fakeip` 时 flush 也会清内存里的映射和绑定（atom 一直开着）。旧域名的客户端下一次查询时，AtomDNS 照常带指令（代理规则的查询不经过缓存），绑定随新地址重建；AtomDNS 的绑定账本不知道这次删除，账本里的旧值最多让下一次重算少发一次相同的指令，不影响新查询。
 
 ## 代理入站（mixed 7890）
 
@@ -80,6 +81,7 @@ atom 用新的 Clash API 密钥确认重载，旧实例不认它，所以确认�
   - 开启 cache file 后重启实例，不重新查 DNS，绑定仍然生效；CLEAR 后重启，仍保持清除状态。
 - `route/fakeip_mixed_test.go`：mixed 入站 + `resolve`，DNS 是一个模拟 AtomDNS 的测试服务（代理的域名转问 sing-box 的 FakeIP DNS 并带 SET/CLEAR，直连的域名给真实地址，屏蔽的给空应答），用连接 tracker 记录实际出口：代理 → 绑定的组、域名保留；没有绑定的 FakeIP → `route.final`；真实地址 → direct；空应答 → 连接失败；直接发 IP → `route.final`。
 - `cmd/sing-box/cmd_run_test.go`：用假的实例驱动 `runLoop`：重载到启动失败的配置后重建旧实例、进程不退出，下一次重载正常；重建期间到达的 SIGHUP 不打断重建、重建后再处理（假实例按真实 `create` 的行为：监听 SIGHUP 的启动会被取消）；重建期间又来了终止信号时正常退出、不执行排队的重载；另有一个调用真实 `create` 的测试：运行循环的通道已被 SIGHUP 占满，在构造实例前给自己发 SIGTERM，`create` 返回 `errStopped`；重读失败时保留当前配置；第一次启动失败照旧返回错误。反向验证：去掉重建那一段、重建时也监听 SIGHUP、把信号监听挪回构造实例之后、或者不检查 `errStopped`，对应的测试失败。
+- `experimental/clashapi/cache_test.go`（2026-11-12）：flush 经过 store 的 `Reset()`；store 用 cache file 时不另清，不用时另清；没有 FakeIP 服务器时只清 cache file；失败返回 500。反向验证：换回上游的 flush，测试失败。测试机 `atom` 上实测：flush 返回 204，之后 `api.openai.com` 重新分到地址、带 SET 重新绑定，连接走 AI 组。
 - `dns/transport/fakeip/reclaim_test.go`（2026-11-12）：单地址的地址池（`/30`）里，新域名回收地址时删掉旧域名的绑定（内存和 cache file 两种存储），不带指令的回收也删；旧域名还有 AAAA 地址时保留；无关域名的绑定不动；旧域名带 SET 重新查询后绑定恢复。另一个测试让存储在写完 a 的 SET 后停一下，这时 b 来回收地址：结束后凡是占着地址的域名都必须有绑定。反向验证：去掉删除那一段，前两个测试失败；去掉 `bindAccess` 锁，最后一个测试失败。
 - `route/fakeip_mixed_test.go` 加了"缓存里的 FakeIP 已经属于另一个有绑定的域名"：按请求的域名查，走 `route.final`；改回反查后这一步拿到别的域名的出口，测试失败（反向验证）。
 - 反向验证：去掉 `route/route.go` 的改动后，上面三个端到端测试会失败（mixed 的测试单独做过：去掉 `resolvedToFakeIP` 后在"代理"那一步失败）。

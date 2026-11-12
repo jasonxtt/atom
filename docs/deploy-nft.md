@@ -161,7 +161,7 @@ ExecStartPre=/opt/atom/lib/policy-route.sh
 
 ## 9. 全部导入的实测（2026-11-12，测试机 `atom`）
 
-测试机 `atom`（Debian 13，双网卡网关：LAN ens33 `10.0.2.4`，WAN ens34），用安装器从 0.1.7 升级到 0.1.8（之后 0.1.9 只换了 WebUI）。客户端是 mosdns-rust（`10.0.0.92`，经主路由过来，主路由只把 FakeIP 网段 `198.18.0.0/18` 转给 atom）。主路由不转任何真实 IP 网段，所以真实 IP 那一项用 atom 上的临时 netns 客户端（veth `atv0`）加一张临时表 `inet atomtest` 做：表的内容就是装好的 `atom.nft`，只把网卡名换成 `atv0`（逐行比对过），测完删掉。看出口用 Clash API 的 `/connections`。
+测试机 `atom`（Debian 13，双网卡网关：LAN ens33 `10.0.2.4`，WAN ens34），用安装器从 0.1.7 升级到 0.1.8（之后 0.1.9 只换了 WebUI，0.1.10 只换了 sing-box：Clash API 的 FakeIP flush 改走 store 的锁）。客户端是 mosdns-rust（`10.0.0.92`，经主路由过来，主路由只把 FakeIP 网段 `198.18.0.0/18` 转给 atom）。主路由不转任何真实 IP 网段，所以真实 IP 那一项用 atom 上的临时 netns 客户端（veth `atv0`）加一张临时表 `inet atomtest` 做：表的内容就是装好的 `atom.nft`，只把网卡名换成 `atv0`（逐行比对过），测完删掉。看出口用 Clash API 的 `/connections`。
 
 1. 加规则"TCP 端口 853 → 新加坡"：netns 客户端连 `1.1.1.1:853`（真实 IP），经 nft redirect 进 sing-box，出口 `g-1ca36c57 → n-7e08187e`，命中的就是这条规则；对照：`1.1.1.1:443` 走 `final`。
 2. 有代理规则的域名：`api.openai.com`（AI 规则 → `g-9ce0f6b7`）得到 FakeIP，客户端连 443，出口 `g-9ce0f6b7 → g-b956a821 → 节点`。
