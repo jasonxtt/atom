@@ -10,6 +10,7 @@
   --bg:#f4f4f6;--card:#ffffff;--fill:#f0f0f3;--fill2:#e7e7ec;--line:#e4e4ea;
   --text:#1b1b22;--muted:#7c7c88;--faint:#a3a3ad;--accent:#2f7cf6;--accent-soft:#e3eeff;--on-accent:#ffffff;
   --ok:#1f9d55;--ok-soft:#e2f5ea;--warn:#c98a12;--warn-soft:#fbf1dc;--bad:#e0484e;--bad-soft:#fde6e7;
+  --lan:#2f7cf6;--lan-soft:#e3eeff;--wan:#8b5cf6;--wan-soft:#efe8ff;
   --sel:#2b2d36;--on-sel:#ffffff;--log:#16171c;--log-ink:#c9cbd6;--shadow:0 1px 2px #0000000d,0 8px 28px #00000010;
   --r-card:22px;--r-ctl:12px;--r-pill:999px;
   --font:-apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;
@@ -20,11 +21,13 @@
   --bg:#0e0f12;--card:#191a1f;--fill:#22232a;--fill2:#2b2c34;--line:#2c2d35;
   --text:#ececf1;--muted:#9a9aa6;--faint:#6d6d79;--accent:#5b9bff;--accent-soft:#1d2c46;--on-accent:#0b1220;
   --ok:#3fc27a;--ok-soft:#173326;--warn:#e8b44a;--warn-soft:#3a2f17;--bad:#ff6b70;--bad-soft:#3d1d20;
+  --lan:#5b9bff;--lan-soft:#1d2c46;--wan:#a78bfa;--wan-soft:#2a2142;
   --sel:#e9e9ef;--on-sel:#15161b;--log:#0b0c0f;--log-ink:#b9bcc8;--shadow:0 1px 2px #00000040,0 8px 28px #00000040;color-scheme:dark}}
 :root[data-theme="dark"]{
   --bg:#0e0f12;--card:#191a1f;--fill:#22232a;--fill2:#2b2c34;--line:#2c2d35;
   --text:#ececf1;--muted:#9a9aa6;--faint:#6d6d79;--accent:#5b9bff;--accent-soft:#1d2c46;--on-accent:#0b1220;
   --ok:#3fc27a;--ok-soft:#173326;--warn:#e8b44a;--warn-soft:#3a2f17;--bad:#ff6b70;--bad-soft:#3d1d20;
+  --lan:#5b9bff;--lan-soft:#1d2c46;--wan:#a78bfa;--wan-soft:#2a2142;
   --sel:#e9e9ef;--on-sel:#15161b;--log:#0b0c0f;--log-ink:#b9bcc8;--shadow:0 1px 2px #00000040,0 8px 28px #00000040;color-scheme:dark}
 *{box-sizing:border-box}
 html,body{min-height:100%}
@@ -116,6 +119,10 @@ textarea.inp{font-family:var(--mono);font-size:12.5px;line-height:1.6;min-height
 .topo .tk svg{width:11px;height:11px}
 .art .ln{stroke:var(--faint);stroke-width:1.6;fill:none}
 .art .hot{stroke:var(--accent);stroke-width:1.8;fill:none}
+.art .lan{stroke:var(--lan);stroke-width:2;fill:none}
+.art .wan{stroke:var(--wan);stroke-width:2;fill:none}
+.art .lan-t{fill:var(--lan)}
+.art .wan-t{fill:var(--wan)}
 .art .box{fill:var(--card);stroke:var(--faint);stroke-width:1.4}
 .topo.sel .art .box{fill:var(--fill)}
 .art .me{fill:var(--accent)}
@@ -135,7 +142,17 @@ textarea.inp{font-family:var(--mono);font-size:12.5px;line-height:1.6;min-height
 .if.multi .tk{border-radius:6px}
 .if.sel .tk{border-color:var(--accent);background:var(--accent);color:var(--on-accent)}
 .if .tk svg{width:11px;height:11px}
-.if.off{opacity:.45;cursor:not-allowed}
+.side{--c:var(--lan);--c-soft:var(--lan-soft);display:flex;flex-direction:column;gap:10px;padding:14px;border-radius:18px;background:var(--fill);border-top:3px solid var(--c)}
+.side.wan{--c:var(--wan);--c-soft:var(--wan-soft)}
+.side .sh{display:flex;align-items:center;gap:10px}
+.side .sh .ic{width:30px;height:30px;border-radius:10px;background:var(--c-soft);color:var(--c);display:grid;place-items:center;flex:none}
+.side .sh .ic svg{width:17px;height:17px}
+.side .sh .nm{font-size:15px;color:var(--c)}
+.side .sh .tag{margin-left:auto}
+.side .if.sel{border-color:var(--c);background:var(--c-soft)}
+.side .if.sel .tk{border-color:var(--c);background:var(--c)}
+.chip{display:inline-flex;align-items:center;gap:4px;font-size:12px;padding:1px 8px;border-radius:var(--r-pill);background:var(--lan-soft);color:var(--lan);font-family:var(--mono)}
+.chip.wan{background:var(--wan-soft);color:var(--wan)}
 .tag{font-size:11.5px;padding:2px 8px;border-radius:var(--r-pill);background:var(--fill2);color:var(--muted);white-space:nowrap}
 .tag.acc{background:var(--accent-soft);color:var(--accent)}
 
@@ -232,6 +249,8 @@ const I = {
   chev: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>',
   left: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>',
   right: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>',
+  home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11l8-6.5 8 6.5V20H4z"/><path d="M10 20v-5h4v5"/></svg>',
+  globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.6 2.6 2.6 14.4 0 17M12 3.5c-2.6 2.6-2.6 14.4 0 17"/></svg>',
   copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9"/></svg>',
 };
 const spin = '<span class="spin"></span>';
@@ -248,10 +267,10 @@ const ART = {
     <circle class="me" cx="120" cy="80" r="11"/><text class="me-t" x="120" y="84" text-anchor="middle">a</text>
   </svg>`,
   gateway: `<svg viewBox="0 0 240 92" aria-hidden="true">
-    <path class="ln" d="M44 46h18"/><path class="hot" d="M62 46h36M142 46h34"/><path class="ln" d="M176 46h20"/>
+    <path class="ln" d="M44 46h18"/><path class="lan" d="M62 46h36"/><path class="wan" d="M142 46h34"/><path class="ln" d="M176 46h20"/>
     <rect class="box" x="8" y="31" width="36" height="30" rx="8"/><text x="26" y="78" text-anchor="middle">设备</text>
     <circle class="me" cx="120" cy="46" r="18"/><text class="me-t" x="120" y="50" text-anchor="middle">a</text>
-    <text x="80" y="38" text-anchor="middle">LAN</text><text x="160" y="38" text-anchor="middle">WAN</text>
+    <text class="lan-t" x="80" y="38" text-anchor="middle">LAN</text><text class="wan-t" x="160" y="38" text-anchor="middle">WAN</text>
     <rect class="box" x="196" y="31" width="36" height="30" rx="8"/><text x="214" y="78" text-anchor="middle">外网</text>
   </svg>`,
 };
@@ -339,9 +358,10 @@ function viewNet() {
   if (c.topology === 'bypass') {
     h += '<div class="sec"><div class="lbl">网卡</div><div class="ifs">' + ifs.map(i => ifRow(i, { name: 'lan_one', bind: 'lan_one', selected: c.lan[0] === i.name })).join('') + '</div>' + errOf('lan') + '</div>';
   } else if (c.topology === 'gateway') {
+    const sideHead = (cls, icon, name, tag) => `<div class="sh"><span class="ic">${icon}</span><span class="nm">${name}</span><span class="tag">${tag}</span></div>`;
     h += '<div class="g2">';
-    h += '<div class="sec"><div class="lbl">LAN 网卡</div><div class="ifs">' + ifs.map(i => ifRow(i, { name: 'lan_multi', bind: 'lan_multi', multi: true, selected: c.lan.includes(i.name) })).join('') + '</div>' + errOf('lan') + '</div>';
-    h += '<div class="sec"><div class="lbl">WAN 网卡</div><div class="ifs">' + ifs.map(i => ifRow(i, { name: 'wan', bind: 'wan', selected: c.wan === i.name })).join('') + '</div>' + errOf('wan') + '</div>';
+    h += '<div class="side lan">' + sideHead('lan', I.home, 'LAN 网卡', '内网 · 可多选') + '<div class="ifs">' + ifs.map(i => ifRow(i, { name: 'lan_multi', bind: 'lan_multi', multi: true, selected: c.lan.includes(i.name) })).join('') + '</div>' + errOf('lan') + '</div>';
+    h += '<div class="side wan">' + sideHead('wan', I.globe, 'WAN 网卡', '外网 · 单选') + '<div class="ifs">' + ifs.map(i => ifRow(i, { name: 'wan', bind: 'wan', selected: c.wan === i.name })).join('') + '</div>' + errOf('wan') + '</div>';
     h += '</div>';
     h += `<div class="alert">${I.warn}<div class="grow"><div>LAN 网卡上的全部流量都会经过这台机器：FakeIP 和 IP 规则网段进入 sing-box，其余流量转发并 NAT 到 WAN。</div>
       <label class="agree"><input type="checkbox" data-bind="accept_gateway" ${c.accept_gateway ? 'checked' : ''}>我知道，继续</label>${errOf('accept_gateway')}</div></div>`;
@@ -373,7 +393,7 @@ function viewConfirm() {
   const c = S.cfg, gw = c.topology === 'gateway';
   const tile = (k, v, s, wide) => `<div class="tile${wide ? ' wide' : ''}"><div class="k">${k}</div><div class="v">${v}</div>${s ? `<div class="s">${s}</div>` : ''}</div>`;
   let h = head('确认') + '<div class="tiles">';
-  h += tile('部署方式', gw ? '双网卡网关' : '单网卡旁路由', gw ? `LAN ${esc(c.lan.join(', '))} · WAN ${esc(c.wan)}` : esc(c.lan[0] || ''));
+  h += tile('部署方式', gw ? '双网卡网关' : '单网卡旁路由', gw ? `<span class="chip">LAN ${esc(c.lan.join(', '))}</span> <span class="chip wan">WAN ${esc(c.wan)}</span>` : esc(c.lan[0] || ''));
   h += tile('面板端口', esc(c.panel_port));
   if (S.state.has_data) {
     h += tile('设置', '沿用已有数据', '', true);
@@ -419,12 +439,8 @@ function viewDone() {
   let h = `<div class="hero"><div class="big">${I.ok}</div><h1>安装完成</h1><div class="url">${esc(url)}</div></div>`;
   h += '<div class="sec"><div class="lbl">接下来</div><div class="todo">';
   const item = (n, body) => `<div class="check"><span class="n">${n}</span><div class="grow">${body}</div></div>`;
-  if (h0.topology === 'gateway') {
-    h += item(1, `LAN 客户端的网关和 DNS 指向 ${valChip(ip)}`);
-  } else {
-    h += item(1, `主路由添加静态路由 ${valChip(h0.fakeip_range)} → ${valChip(ip)}`);
-    h += item(2, `DHCP 下发的 DNS 改成 ${valChip(ip)}`);
-  }
+  h += item(1, `主路由添加静态路由 ${valChip(h0.fakeip_range)} → ${valChip(ip)}`);
+  h += item(2, `客户端的 DNS 设置为 ${valChip(ip)}`);
   h += '</div></div>';
   const w = S.job.warnings || [];
   if (w.length) h += `<div class="alert">${I.warn}<div class="grow warnlist">${w.map(x => `<div>${esc(x)}</div>`).join('')}</div></div>`;
