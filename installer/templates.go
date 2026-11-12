@@ -40,11 +40,13 @@ table inet atom {
 		meta nfproto ipv4 meta l4proto tcp redirect to :7892
 	}
 
-	# UDP: TProxy to sing-box tproxy-in (7893); the mark sends it to table 233 (local).
+	# UDP: TProxy to sing-box tproxy-in (7893); the mark sends it to table 233 (local). The
+	# replies of a flow opened from elsewhere (the WAN) are forwarded as they are.
 	chain prerouting_udp {
 		type filter hook prerouting priority mangle; policy accept;
 		iifname != { %[1]s } return
 		fib daddr type { local, broadcast, multicast } return
+		ct direction reply return
 		meta nfproto ipv4 meta l4proto udp tproxy ip to :7893 meta mark set %[2]s accept
 	}
 }

@@ -60,6 +60,7 @@ table inet atom {
 		type filter hook prerouting priority mangle; policy accept;
 		iifname != { @LAN@ } return
 		fib daddr type { local, broadcast, multicast } return
+		ct direction reply return
 		meta nfproto ipv4 meta l4proto udp tproxy ip to :7893 meta mark set 0x233 accept
 	}
 }
@@ -68,6 +69,7 @@ table inet atom {
 - 开头的 `table inet atom` + `delete table inet atom` 让文件可以重复加载：每次都整表替换，不会叠出重复规则。表里没有集合，加载完就生效，不用等 atomdns。
 - 链名不能用 `redirect`、`tproxy`（nft 的关键字），所以叫 `prerouting_tcp` / `prerouting_udp`。
 - `meta nfproto ipv4`：`inet` 表也看 IPv6，sing-box 的 redirect、TProxy 入站只监听 IPv4。
+- `ct direction reply return`（UDP，codex 复审后加）：别处（比如双网卡时 WAN 那边）发起、经过这台机器的 UDP 流，LAN 里回过来的包不导进 sing-box，照常转发。TCP 的 redirect 在 nat 链里，只看新连接的第一个包，不受影响。
 
 ### 3.2 只有双网卡网关要的：`/etc/atom/atom-gateway.nft`
 
@@ -153,11 +155,15 @@ ExecStartPre=/opt/atom/lib/policy-route.sh
 
 结果都符合预期，详见 design.md 第 11 节第 4 条。单网卡和网关两种形态都实测过；第 5 节的主路由风险没有实测条件。这是按集合挑选目标时的实测；改成全部导入后的实测见第 8 节。
 
-## 8. 全部导入的实测（2026-11-12，测试机 `atom`）
+## 8. 已知限制
+
+- **转过来的网段和本机自己的出站**（codex 复审指出，记为限制）：主路由把网段 R 转给这台机器。如果 sing-box 的 direct 出站（直连规则、没被代理的 IP 规则）、代理节点的地址或 DNS 上游落在 R 里，本机发往 R 的包走默认路由到主路由，又被主路由按同一条静态路由送回来，转不出去。原来按集合挑选时，IP 规则网段也有同样的问题；全部导入只是让"转过来的网段"不再需要同时写成 IP 规则。处理办法：主路由的这条路由排除来源是这台机器的包（按来源的策略路由），或者别让直连目标、节点和上游落在转过来的网段里。安装器和 atom 不处理主路由。
+
+## 9. 全部导入的实测（2026-11-12，测试机 `atom`）
 
 见共享笔记 `rules-nft.md` 和 design.md 第 11 节（结果写在完成后）。
 
-## 9. 卸载
+## 10. 卸载
 
 ```sh
 nft delete table inet atom

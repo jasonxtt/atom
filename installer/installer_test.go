@@ -25,7 +25,7 @@ func TestRenderNft(t *testing.T) {
 		`iifname != { "ens34", "ens35" } return`,
 		"fib daddr type { local, broadcast, multicast } return",
 		"meta nfproto ipv4 meta l4proto tcp redirect to :7892\n",
-		"meta nfproto ipv4 meta l4proto udp tproxy ip to :7893 meta mark set 0x233 accept\n",
+		"ct direction reply return\n\t\tmeta nfproto ipv4 meta l4proto udp tproxy ip to :7893 meta mark set 0x233 accept\n",
 		"delete table inet atom",
 	} {
 		if !strings.Contains(got, want) {

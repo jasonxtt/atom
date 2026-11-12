@@ -53,10 +53,10 @@ AtomDNS 决定域名走哪个出口，把结果放在发给 sing-box FakeIP DNS 
 
 - 解析出的地址全部属于 FakeIP 网段：说明 AtomDNS 决定代理，并且已经通过 FakeIP DNS 写好了绑定（AtomDNS 先问 sing-box 再回应答，没有时序问题）。补丁丢掉这些地址，目标保留域名，由代理服务器远端解析；**按连接请求的域名**查绑定（查不到再试一次小写），有绑定走对应的组，没有走 `route.final`。之后的路由规则不再匹配。
 - 不用地址反查域名（codex 复审后改）：AtomDNS 从缓存里答的 FakeIP，在 sing-box 那边可能已经因为地址池循环分给了别的域名，或者映射已经丢了；反查会拿到别的域名的绑定，或者查不到。连接本来就带着目标域名，直接按它查，两种情况都不会出错：没绑定的域名就走 `route.final`，和 AtomDNS 的判断一致（代理规则的查询不经过 AtomDNS 缓存，每次都带 SET）。
-- 有真实地址：不处理，交给后面的路由规则（atom 生成的是"IP 规则 → 组，其余域名 → direct"）。
+- 有真实地址：不处理，交给后面的路由规则（atom 生成的是"IP、端口、网络规则 → 对应的组，其余域名 → direct"）。
 - 空应答或 NXDOMAIN：上游 `resolve` 本来就报错（`empty result`），连接被拒，等于屏蔽。
 
-直接发来 IP 的连接不做 `resolve`，只匹配 IP 规则，没命中走 `route.final`。
+直接发来 IP 的连接不做 `resolve`，只匹配 IP、端口、网络规则，没命中走 `route.final`。
 
 ## 重载失败时保留服务（`cmd/sing-box/cmd_run.go`）
 
