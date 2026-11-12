@@ -371,7 +371,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 
 第 6 步定下的 **[定]**：AtomDNS 这一侧的开放项不进 `settings`，单独两个资源。原因：`settings` 写 `atom_proxy.json`、走 sing-box 应用事务；这些项写 `webinfo/settings.json`、发布 AtomDNS 的新一代配置，放在一个 PUT 里会一半成功一半失败。
 
-- `GET/PUT dns`：`core_mode`、`block_qtypes`（SOA/PTR/HTTPS）、`block_aaaa`、`prefer_v4`、`full_cache`（界面叫"未命中规则的缓存"）、`lazy_cache`（"上游应答缓存"）、`block_empty`（空结果屏蔽，2026-11-12 开放）（只开放开关，缓存容量用 YAML 的默认值）、`ecs`（国外查询带的 ECS 地址，空串恢复默认）、`learning`（`enabled`、`remember_direct`、`remember_proxy`、`no_v4`、`no_v6`；关掉的学习名单随即清空）。改 `core_mode` 会启动一次 requery。
+- `GET/PUT dns`：`core_mode`、`block_qtypes`（SOA/PTR/HTTPS）、`block_aaaa`、`prefer_v4`、`full_cache`（界面叫"全局缓存"）、`lazy_cache`（"上游应答缓存"）、`block_empty`（空结果屏蔽，2026-11-12 开放）（只开放开关，缓存容量用 YAML 的默认值）、`ecs`（国外查询带的 ECS 地址，空串恢复默认）、`learning`（`enabled`、`remember_direct`、`remember_proxy`、`no_v4`、`no_v6`；关掉的学习名单随即清空）。改 `core_mode` 会启动一次 requery。
 - `GET upstreams`、`PUT upstreams/{tag}`：国内（`domestic`）、国外（`foreign`）、国外带 ECS（`foreignecs`）三组上游，条目是 AtomDNS 原有的上游条目（`use_proxy` 就是 7.1 说的按上游关闭代理）；`protocol` 可以是 `udp`、`tcp`、`tls`/`dot`、`https`/`doh`、`h3`、`quic`/`doq`，DoH 加 `enable_http3: true` 就是 DoH over HTTP/3（和 `h3` 等价，界面上是 DoH 的 HTTP/3 开关，存成 `https` + `enable_http3`），`quic` 是 DoQ；这两种不能开 `use_proxy`（400）（2026-11-12 合入上游 v0.6.6）；FakeIP 组（`nocnfake`）不出现，也改不了。至少保留一个启用的条目；空列表恢复配置的默认列表。
 - 这两个资源不带 `version`，后写的覆盖先写的。
 - 其余开关不开放；`client_routing` 删除，改用规则表的客户端条件（4.2）。
@@ -528,7 +528,7 @@ atom/
 7. **安装器**（已完成，2026-11-12；设计、行为和验证见 9.2，说明见 [installer/README.md](../installer/README.md)）：一条命令加网页向导，装到 `/opt/atom/`，支持升级、卸载、保留数据重装、失败撤销；配套包由 `installer/scripts/build-package.sh` 组装。同时清理了 atomdns 里旧的发布流程（在线更新清单、Docker 镜像脚本和工作流、`docs/rust/docker.md`，`release.md` 改写成 atom 的打包步骤）。
 
 8. **DNS 页补全**（2026-11-12）：用户反馈新 DNS 页比原版 AtomDNS 少了很多，fork 里仍成立的都补上。
-   - 菜单：概览、日志、上游、高级设置。概览照原版布局：查询数量、平均响应、缓存命中（各缓存命中数之和 / 查询数之和）、域名统计（不同域名数）；上游统计表（每个上游的请求数、采纳率、出错率、平均延迟，按组分段，含自定义组和 FakeIP 组）；分流状态环形图（规则命中占比，前 5 加"其他"，点图例看明细）；热门域名、活跃客户端、最慢查询。排行和图例都能点开明细（分页），明细里的日志行能点开单条详情。日志页点行看详情（基本、应答、分流与上游、上游尝试）。高级设置（宽屏时第一行是解析、重定向 / hosts、TTL 上限和查询日志，第二行缓存和域名学习并排，变窄后分行）：解析（核心模式、ECS、IPv4 优先、IPv6 屏蔽、类型屏蔽、空结果屏蔽）、缓存（两个开关改名为"未命中规则的缓存""上游应答缓存"，每个缓存一行：条目、命中率、容量、过期保留、写盘间隔、清空）、域名学习（总开关、四类、定期刷新）、TTL 上限、查询日志（记录、容量、清空）、重定向 / hosts（原"重写"）。缓存的容量、过期保留、写盘间隔只显示不修改。
+   - 菜单：概览、日志、上游、高级设置。概览照原版布局：查询数量、平均响应、缓存命中（各缓存命中数之和 / 查询数之和）、域名统计（不同域名数）；上游统计表（每个上游的请求数、采纳率、出错率、平均延迟，按组分段，含自定义组和 FakeIP 组）；分流状态环形图（规则命中占比，前 5 加"其他"，点图例看明细）；热门域名、活跃客户端、最慢查询。排行和图例都能点开明细（分页），明细里的日志行能点开单条详情。日志页点行看详情（基本、应答、分流与上游、上游尝试）。高级设置（宽屏时第一行是解析、重定向 / hosts、TTL 上限和查询日志，第二行缓存和域名学习并排，变窄后分行）：解析（核心模式、ECS、IPv4 优先、IPv6 屏蔽、类型屏蔽、空结果屏蔽）、缓存（两个开关叫"全局缓存""上游应答缓存"，每个缓存一行：条目、命中率、容量、过期保留、写盘间隔、清空）、域名学习（总开关、四类、定期刷新）、TTL 上限、查询日志（记录、容量、清空）、重定向 / hosts（原"重写"）。缓存的容量、过期保留、写盘间隔只显示不修改。
    - 后端：第 8 节表格里的 `caches`、`stats/upstreams`、`learning`、`requery`；`dns` 开放 `block_empty`；审计日志输出 `cache_status`；`lazy_cache` 管 `cache_atom_<组>`（4.8）；规则命中的域名不再学"无 V6"（4.8）；清缓存收窄（4.5.1 的"清缓存"，含"发布新一代配置时全清"的限制）。
    - 不恢复：DNS 分流模式、国内域名 FakeIP、黑白灰名单、广告总开关、客户端分流、DDNS、专属分流组、SOCKS5、学习状态面板、诊断抓取。
 
