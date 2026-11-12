@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # atom: installs the installer. Paste this on the machine that is to become the gateway:
 #   curl -fsSL <address of this script> | sudo bash
+# Arguments are passed on to the upgrade (curl ... | sudo bash -s -- --force downgrades).
 # It downloads the matching atom package (GitHub first, then the accelerators below when GitHub is
 # slow or not reachable), unpacks it under /opt/atom and starts the installation wizard, whose address
 # it prints. On a machine where atom is already installed it upgrades instead.
@@ -108,7 +109,7 @@ tar -xzf "$PKGFILE" -C "$PKG" --strip-components=1 || die "解包失败"
 
 if grep -qs '"complete": true' "$ROOT/etc/install.json"; then
   say "已安装 atom，升级…"
-  exec "$PKG/bin/atom-installer" upgrade --pkg "$PKG"
+  exec "$PKG/bin/atom-installer" upgrade --pkg "$PKG" "$@"
 fi
 
 systemctl reset-failed atom-installer.service 2>/dev/null || true
