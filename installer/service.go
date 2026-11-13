@@ -104,7 +104,7 @@ func (systemdInit) Forget(log Logger, names ...string) {
 // openRCInit runs atom's services in the default runlevel. The log of each is /var/log/atom/<name>.log.
 type openRCInit struct{}
 
-const openRCLogDir = "/var/log/atom"
+var openRCLogDir = "/var/log/atom" // a variable for the tests
 
 func rcName(n string) string { return strings.TrimSuffix(n, ".service") }
 

@@ -1262,3 +1262,21 @@ func TestAlpineAndContainer(t *testing.T) {
 		t.Error("marker file")
 	}
 }
+
+func TestUninstallRemovesOpenRCLogs(t *testing.T) {
+	logs := filepath.Join(t.TempDir(), "atom")
+	openRCLogDir = logs
+	defer func() { openRCLogDir = "/var/log/atom" }()
+	for _, purge := range []bool{false, true} {
+		os.MkdirAll(logs, 0o755)
+		os.WriteFile(filepath.Join(logs, "atom-dns.log"), []byte("x"), 0o644)
+		p := Paths{Root: t.TempDir(), UnitDir: t.TempDir(), OpenRC: true}
+		writeJSON(p.State(), &InstallState{Version: "0.1.0"})
+		if err := uninstall(p, purge, &recLogger{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(logs); err == nil {
+			t.Errorf("purge=%v: the log directory stays", purge)
+		}
+	}
+}
