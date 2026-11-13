@@ -510,6 +510,17 @@ v0 不做 IPv6 FakeIP，被代理的域名只返回 IPv4。
 - **UDP 53 的写回**（联调发现，用户选的修法）：sing-box 的 TProxy 回包要用 IP_TRANSPARENT 绑定"原目标地址:端口"，atomdns 在 `*:53` 监听且没设 `SO_REUSEADDR` 时，客户端发往 FakeIP 或 IP 规则地址的 UDP 53（比如 IP 规则里有 8.8.8.8，客户端直接问它）绑定报 `EADDRINUSE`，回包发不出去。改为 atomdns 在通配地址（`[::]`、`0.0.0.0`）上的 UDP 监听设 `SO_REUSEADDR`（`rust/native-host/src/bind.rs`）。代价：同一台机器上再起一个监听通配地址的 atomdns，不会再报端口被占用，而是共用 53 端口；具体地址的监听照旧拒绝重复绑定。
 - **拓扑**：单网卡旁路由和双网卡网关都在 netns 里实测过（deploy-nft.md 第 7 节）。单网卡时主路由只看到去程，转发链里"丢弃 invalid"的规则可能丢包，这一点没有实测条件，文档给了三种处理办法，其中之一是安装器的"回包经主路由"选项（2026-11-14，deploy-nft.md 3.4）。
 
+### 9.5 arm64 和 Alpine（第 11 步）**[定]**
+
+2026-11-14 用户定：在 Debian/Ubuntu + x86_64 之外，支持 arm64 和 Alpine（OpenRC），四种组合都用同一套安装器。armv7 不做；Docker/LXC 里的 Alpine 不支持，环境检查拦下；Alpine 最低 3.19。
+
+- **包**：四个，`atom-<版本>-linux-{amd64,arm64,amd64-musl,arm64-musl}.tar.gz`。atomdns 按 libc 选：Debian/Ubuntu 用 glibc 版（`amd64`、`arm64-gnu`，不需要比 2.36 新的 glibc），Alpine 用 musl 版（`amd64-musl`、`arm64`），都取自 atomdns `release-build.yml` 的产物。不全换 musl：atomdns 没有换内存分配器，musl 的 malloc 在多线程下慢。sing-box 和 `atom-installer` 是 `CGO_ENABLED=0` 的静态程序，每个架构编一次，glibc 和 musl 包共用。`build-package.sh` 一次出四个包、一个 `install.sh`（写进四个 sha256）和 `SHA256SUMS`。
+- **引导脚本**：按 `uname -m`（`x86_64`、`aarch64`）和 `/etc/os-release` 的 `ID`（`debian`、`ubuntu`、`alpine`）选包；要 systemd 或 OpenRC 之一。Alpine 的命令是 `apk add bash curl && curl -fsSL <地址> | bash`（脚本仍是 bash）。向导在 systemd 上用 `systemd-run`，在 OpenRC 上用 `start-stop-daemon --background --make-pidfile`；关闭向导时等的是 pidfile 里的进程退出。
+- **服务**：安装器里一层很薄的服务接口，systemd 和 OpenRC 两个实现（写服务定义、生效、enable/disable、start/stop/restart、is-active、最近日志）。OpenRC 的 `/etc/init.d/atom-dns`、`/etc/init.d/atom-sing-box` 用 `supervise-daemon` 自动重启；nft、sysctl、`policy-route.sh` 放在 `start_pre()`；sing-box 另有 `reload`（发 HUP）；日志在 `/var/log/atom/`。`atom_rules.yaml` 里 sing-box 的 `reload` 在 OpenRC 上由安装器每次安装、升级时改写为 `/opt/atom/lib/reload-sing-box.sh`（在运行就 reload，没运行就 start，同 `reload-or-restart`），atomdns 子模块不改。
+- **依赖**：Alpine 用 `apk add nftables iproute2`，始终要 iproute2（busybox 的 `ip` 不保证策略路由，也没有 `ss`）；`sysctl` 用 busybox 的。装过的包记进 `changes.json`，卸载时 `apk del`。
+- **53 端口（Alpine）**：占用进程沿父进程链对上 `/run/openrc/daemons/<服务>/001` 里的 pidfile，就是那个 OpenRC 服务；"停用"按钮 `rc-service <服务> stop` 并从所在运行级别删掉（`rc-update del`），原来的运行级别记进 `changes.json`，卸载时加回并启动。对不上服务的进程只提示。`/etc/resolv.conf` 只有回环地址时，依赖先装，停用后把它改成默认网关，原内容备份，卸载时恢复。
+- **验证**：Alpine amd64 用测试机 `ssh alpine`（Alpine 3.23，linux-virt 6.18，内核有 `nft_tproxy`，2026-11-14 查过；上面原来跑着 atomdns 和 match-router，用户同意测试时停掉，测完恢复）；arm64 用用户提供的 Armbian 机器。
+
 ## 10. 仓库与版本
 
 ```text
@@ -560,6 +571,8 @@ atom/          jasonxtt/atom
    - 新建条件的规则集选择框只列 MetaCubeX 和 blackmatrix7 的目录条目，不再列默认规则集（`adguard`、`geosite_cn`、`geosite_no_cn`、`cuscn`、`cusnocn`）。已经引用默认规则集的规则（默认规则表第 2～4 条）照常显示、编辑、保存，可以删掉这个条件；删掉以后不能再从选择框选回来（用户接受：广告规则改用目录里的规则集）。
 
 10. **规则页：测试域名改成 dry-run**（2026-11-12，用户定）**[定]**：测试框调用 `POST rules/dryrun`（第 8 节），按真实流程的顺序列出每一步命中与否和原因，给出结论；代理时把组按 sing-box 当前选中项展开到节点；对照绑定账本。探测真的查上游但不留痕迹，不读不写缓存。代码 `webui/src/dryrun.ts`（测试 `tests/dryrun.test.mjs`）、`RulesPage.vue`。
+
+11. **arm64 和 Alpine**（2026-11-14 定，见 9.5）：11a 打包（四个包，`install.sh` 按架构和系统选包）；11b arm64（systemd），在 Armbian 上验证；11c Alpine（OpenRC 服务、apk、53 端口、改写重载命令），在 `ssh alpine` 上验证；11d 更新 9.2 和 `installer/README.md`。
 
 每一步都单独验收后再进行下一步。实施顺序已认可。**[定]**
 
