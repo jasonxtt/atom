@@ -97,7 +97,7 @@ func (ins *Installer) applyUpgrade(st *InstallState, oldSingBox string, log Logg
 	if err := ins.writeNetworkFiles(st, log); err != nil {
 		return err
 	}
-	if err := runCmd(log, 60*time.Second, "systemctl", "restart", dnsUnitName); err != nil {
+	if err := ins.Paths.Init().Restart(log, dnsUnitName); err != nil {
 		return err
 	}
 	api := newAPIClient(st.PanelPort, ins.Paths.Data())
@@ -106,7 +106,7 @@ func (ins *Installer) applyUpgrade(st *InstallState, oldSingBox string, log Logg
 	}
 	if fileSHA256(ins.Paths.Bin("sing-box")) != oldSingBox {
 		log.Logf("sing-box 程序变了，重启它")
-		if err := runCmd(log, 60*time.Second, "systemctl", "restart", singBoxUnitName); err != nil {
+		if err := ins.Paths.Init().Restart(log, singBoxUnitName); err != nil {
 			return err
 		}
 	}
@@ -122,6 +122,7 @@ type backupItem struct {
 	path, name string
 	file       bool
 	exact      bool
+	mode       os.FileMode // of a file item when put back; 0 is 0644
 }
 
 // backed up: programs, the state and network files, the shipped configuration (not the data), the WebUI.
@@ -135,8 +136,8 @@ func (ins *Installer) backupItems() []backupItem {
 		{path: filepath.Join(p.Data(), "ui", "main"), name: "data/ui/main", exact: true},
 		{path: filepath.Join(p.Data(), "config_custom.yaml"), name: "data/config_custom.yaml", file: true},
 		{path: filepath.Join(p.Data(), "rule", "atom_catalog.json"), name: "data/rule/atom_catalog.json", file: true},
-		{path: p.DNSUnit(), name: "units/" + dnsUnitName, file: true},
-		{path: p.SingBoxUnit(), name: "units/" + singBoxUnitName, file: true},
+		{path: p.DNSUnit(), name: "units/" + filepath.Base(p.DNSUnit()), file: true, mode: p.unitMode()},
+		{path: p.SingBoxUnit(), name: "units/" + filepath.Base(p.SingBoxUnit()), file: true, mode: p.unitMode()},
 	}
 }
 
@@ -184,7 +185,11 @@ func (ins *Installer) restoreBackup(dir string, panelPort int, log Logger) error
 		}
 		var err error
 		if it.file {
-			err = copyFileAtomic(src, it.path, 0o644)
+			mode := it.mode
+			if mode == 0 {
+				mode = 0o644
+			}
+			err = copyFileAtomic(src, it.path, mode)
 		} else {
 			if it.exact {
 				os.RemoveAll(it.path)
@@ -195,13 +200,14 @@ func (ins *Installer) restoreBackup(dir string, panelPort int, log Logger) error
 			return err
 		}
 	}
-	if err := runCmd(log, 30*time.Second, "systemctl", "daemon-reload"); err != nil {
+	init := ins.Paths.Init()
+	if err := init.Reload(log); err != nil {
 		return err
 	}
-	if err := runCmd(log, 60*time.Second, "systemctl", "restart", dnsUnitName); err != nil {
+	if err := init.Restart(log, dnsUnitName); err != nil {
 		return err
 	}
-	if err := runCmd(log, 60*time.Second, "systemctl", "restart", singBoxUnitName); err != nil {
+	if err := init.Restart(log, singBoxUnitName); err != nil {
 		return err
 	}
 	if _, err := newAPIClient(panelPort, ins.Paths.Data()).waitStatus(60*time.Second, func(s *apiStatus) bool { return s.SingBox.Running && s.SingBox.InSync }); err != nil {

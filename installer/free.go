@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -91,43 +93,162 @@ func restoreResolved(p Paths, ch *Changes, log Logger) error {
 	return nil
 }
 
-func unitProperty(verb, unit string) string {
-	out, _ := quietCmd("systemctl", verb, unit)
-	return out
-}
-
-// freeUnit stops and disables a service that holds a port; how it was is recorded first.
+// freeUnit stops and disables a systemd service that holds a port; how it was is recorded first.
 func freeUnit(p Paths, unit string, log Logger) error {
 	if isOurUnit(unit) || !strings.HasSuffix(unit, ".service") || strings.ContainsAny(unit, " /") {
 		return fmt.Errorf("不能停用 %q", unit)
 	}
+	sd := systemdInit{}
 	ch := loadChanges(p)
 	known := false
 	for _, u := range ch.DisabledUnits {
 		known = known || u.Unit == unit
 	}
-	enabled := strings.HasPrefix(unitProperty("is-enabled", unit), "enabled")
+	enabled := sd.IsEnabled(unit)
 	if !known {
-		ch.DisabledUnits = append(ch.DisabledUnits, UnitState{Unit: unit, WasEnabled: enabled, WasActive: unitProperty("is-active", unit) == "active"})
+		ch.DisabledUnits = append(ch.DisabledUnits, UnitState{Unit: unit, WasEnabled: enabled, WasActive: sd.IsActive(unit) == "active"})
 		if err := saveChanges(p, ch); err != nil {
 			return err
 		}
 	}
 	if enabled {
-		return runCmd(log, 60*time.Second, "systemctl", "disable", "--now", unit)
+		return sd.DisableNow(log, unit)
 	}
-	return runCmd(log, 60*time.Second, "systemctl", "stop", unit)
+	return sd.Stop(log, unit)
 }
 
-// restoreUnit puts a service back as it was: enabled or not, started or not.
-func restoreUnit(u UnitState, log Logger) error {
+// restoreUnit puts a service back as it was: enabled or not, started or not (OpenRC: in each runlevel it was in).
+func restoreUnit(p Paths, u UnitState, log Logger) error {
+	if u.OpenRC {
+		for _, l := range u.Runlevels {
+			if err := runCmd(log, 30*time.Second, "rc-update", "add", u.Unit, l); err != nil {
+				return err
+			}
+		}
+		if u.WasActive {
+			return openRCInit{}.Start(log, u.Unit)
+		}
+		return nil
+	}
+	sd := systemdInit{}
 	if u.WasEnabled {
-		if err := runCmd(log, 60*time.Second, "systemctl", "enable", u.Unit); err != nil {
+		if err := sd.Enable(log, u.Unit); err != nil {
 			return err
 		}
 	}
 	if u.WasActive {
-		return runCmd(log, 60*time.Second, "systemctl", "start", u.Unit)
+		return sd.Start(log, u.Unit)
 	}
+	return nil
+}
+
+var (
+	resolvConfPath = "/etc/resolv.conf"
+	runlevelsDir   = "/etc/runlevels"
+)
+
+// loopbackOnly: resolv.conf names at least one server and all of them are on this machine, so names stop
+// resolving once the service that holds port 53 is stopped.
+func loopbackOnly(text string) bool {
+	n := 0
+	for _, line := range strings.Split(text, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 || f[0] != "nameserver" {
+			continue
+		}
+		ip := net.ParseIP(strings.SplitN(f[1], "%", 2)[0])
+		if ip == nil || !ip.IsLoopback() {
+			return false
+		}
+		n++
+	}
+	return n > 0
+}
+
+// runlevelsOf is the runlevels (directories of dir) that hold the OpenRC service svc.
+func runlevelsOf(dir, svc string) []string {
+	entries, _ := os.ReadDir(dir)
+	var out []string
+	for _, e := range entries {
+		if _, err := os.Lstat(filepath.Join(dir, e.Name(), svc)); err == nil {
+			out = append(out, e.Name())
+		}
+	}
+	return out
+}
+
+// freeOpenRCService stops an OpenRC service that holds a port and takes it out of its runlevels; how it was is
+// recorded first. When resolv.conf only names this machine, the dependencies are installed first (while names
+// still resolve) and resolv.conf then points at the default gateway; its content is saved for the uninstall.
+func freeOpenRCService(p Paths, svc string, log Logger) error {
+	if isOurUnit(svc) || svc == "" || strings.ContainsAny(svc, " /") {
+		return fmt.Errorf("不能停用 %q", svc)
+	}
+	conf, _ := os.ReadFile(resolvConfPath)
+	lo := loopbackOnly(string(conf))
+	var gw string
+	if lo {
+		out, _ := quietCmd("ip", "-4", "route", "show", "default")
+		var gws []string
+		for _, v := range parseDefaultVia(out) {
+			gws = append(gws, v)
+		}
+		sort.Strings(gws)
+		if len(gws) == 0 {
+			return fmt.Errorf("/etc/resolv.conf 只指向本机，但找不到默认网关可以改成")
+		}
+		gw = gws[0]
+		if err := ensureDeps(p, false, log); err != nil {
+			return err
+		}
+	}
+	ch := loadChanges(p)
+	known := false
+	for _, u := range ch.DisabledUnits {
+		known = known || u.Unit == svc
+	}
+	init := openRCInit{}
+	levels := runlevelsOf(runlevelsDir, svc)
+	if !known {
+		ch.DisabledUnits = append(ch.DisabledUnits, UnitState{Unit: svc, OpenRC: true, Runlevels: levels, WasEnabled: len(levels) > 0, WasActive: init.IsActive(svc) == "active"})
+	}
+	if lo && !ch.ResolvConfSaved {
+		if err := writeFileAtomic(p.Etc("resolv.conf.orig"), conf, 0o644); err != nil {
+			return err
+		}
+		ch.ResolvConfSaved = true
+	}
+	if err := saveChanges(p, ch); err != nil {
+		return err
+	}
+	if err := init.Stop(log, svc); err != nil {
+		return err
+	}
+	for _, l := range levels {
+		if err := runCmd(log, 30*time.Second, "rc-update", "del", svc, l); err != nil {
+			return err
+		}
+	}
+	if lo {
+		return writeFileAtomic(resolvConfPath, []byte("nameserver "+gw+"\n"), 0o644)
+	}
+	return nil
+}
+
+// restoreResolvConf puts back the resolv.conf that freeOpenRCService replaced.
+func restoreResolvConf(p Paths, ch *Changes, log Logger) error {
+	if !ch.ResolvConfSaved {
+		return nil
+	}
+	data, err := os.ReadFile(p.Etc("resolv.conf.orig"))
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(resolvConfPath, data, 0o644); err != nil {
+		return err
+	}
+	os.Remove(p.Etc("resolv.conf.orig"))
+	ch.ResolvConfSaved = false
+	log.Logf("已还原 /etc/resolv.conf")
 	return nil
 }

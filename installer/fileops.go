@@ -56,8 +56,9 @@ func productOwned(rel string) bool {
 }
 
 // refreshData lays the shipped configuration tree (pkgConfig) over the configuration root: product files are
-// replaced, everything else is copied only when missing. config_custom.yaml gets the panel port.
-func refreshData(pkgConfig, dataDir string, panelPort int) error {
+// replaced, everything else is copied only when missing. config_custom.yaml gets the panel port; reload, when
+// not empty, is the sing-box reload command that atom_rules.yaml gets (OpenRC).
+func refreshData(pkgConfig, dataDir string, panelPort int, reload string) error {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return err
 	}
@@ -82,6 +83,17 @@ func refreshData(pkgConfig, dataDir string, panelPort int) error {
 				return err
 			}
 			out, err := setPanelPort(string(data), panelPort)
+			if err != nil {
+				return err
+			}
+			return writeFileAtomic(dst, []byte(out), 0o644)
+		}
+		if rel == "sub_config/atom_rules.yaml" && reload != "" {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			out, err := setReloadCommand(string(data), reload)
 			if err != nil {
 				return err
 			}

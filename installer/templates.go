@@ -204,3 +204,93 @@ func setPanelPort(yaml string, port int) (string, error) {
 	}
 	return panelPortRe.ReplaceAllString(yaml, "${1}0.0.0.0:"+strconv.Itoa(port)+"${2}"), nil
 }
+
+// renderDNSInit is renderDNSUnit for OpenRC: supervise-daemon restarts atomdns when it exits (Restart=on-failure),
+// and what the unit does in ExecStartPre happens in start_pre.
+func renderDNSInit(p Paths, nftBin, sysctlBin string, gateway bool, replyDev string) string {
+	var pre strings.Builder
+	fmt.Fprintf(&pre, "\t%s -f %s || return 1\n", nftBin, p.Etc("atom.nft"))
+	if gateway {
+		fmt.Fprintf(&pre, "\t%s -f %s || return 1\n", nftBin, p.Etc("atom-gateway.nft"))
+		fmt.Fprintf(&pre, "\t%s -w net.ipv4.ip_forward=1 || return 1\n", sysctlBin)
+	}
+	if replyDev != "" {
+		fmt.Fprintf(&pre, "\t%s -w net/ipv4/conf/all/accept_redirects=0 net/ipv4/conf/%s/accept_redirects=0 || return 1\n", sysctlBin, replyDev)
+	}
+	fmt.Fprintf(&pre, "\t%s || return 1\n", p.Lib("policy-route.sh"))
+	return fmt.Sprintf(`#!/sbin/openrc-run
+# atom DNS (AtomDNS fork: rules, FakeIP and the control plane). Written by atom-installer.
+description="atom DNS"
+supervisor=supervise-daemon
+command=%[2]s
+command_args="start -d %[3]s -c config_custom.yaml"
+respawn_delay=2
+respawn_max=0
+rc_ulimit="-n 1048576"
+output_log=%[4]s/atom-dns.log
+error_log=%[4]s/atom-dns.log
+
+depend() {
+	need net
+}
+
+start_pre() {
+	checkpath -d -m 0755 %[4]s
+%[1]s}
+`, pre.String(), p.Bin("atomdns"), p.Data(), openRCLogDir)
+}
+
+// renderSingBoxInit is renderSingBoxUnit for OpenRC: reload sends SIGHUP; without config.json it does not start.
+func renderSingBoxInit(p Paths) string {
+	dir := p.Data() + "/sing-box"
+	return fmt.Sprintf(`#!/sbin/openrc-run
+# atom sing-box (FakeIP outbound fork), configured by atom-dns. Written by atom-installer.
+description="atom sing-box"
+supervisor=supervise-daemon
+command=%[1]s
+command_args="run -D %[2]s -c %[2]s/config.json"
+respawn_delay=1
+respawn_max=0
+rc_ulimit="-n 1048576"
+output_log=%[3]s/atom-sing-box.log
+error_log=%[3]s/atom-sing-box.log
+extra_started_commands="reload"
+
+depend() {
+	need net
+}
+
+start_pre() {
+	[ -f %[2]s/config.json ] || { eerror "no %[2]s/config.json"; return 1; }
+	checkpath -d -m 0755 %[3]s
+}
+
+reload() {
+	ebegin "Reloading $RC_SVCNAME"
+	supervise-daemon "$RC_SVCNAME" --signal HUP
+	eend $?
+}
+`, p.Bin("sing-box"), dir, openRCLogDir)
+}
+
+// renderReloadScript is the reload command of atom_rules.yaml on OpenRC: reload sing-box when it runs, else
+// start it (what systemctl reload-or-restart does).
+func renderReloadScript() string {
+	return `#!/bin/sh
+# atom: reload sing-box when it runs, else start it. Written by atom-installer.
+if rc-service atom-sing-box status >/dev/null 2>&1; then
+	exec rc-service atom-sing-box reload
+fi
+exec rc-service atom-sing-box start
+`
+}
+
+var reloadCmdRe = regexp.MustCompile(`(?m)^([ \t]+reload:[ \t]*)\[[^\]\n]*\]`)
+
+// setReloadCommand rewrites the reload command of atom_rules.yaml (singbox.reload) to run cmd.
+func setReloadCommand(yaml, cmd string) (string, error) {
+	if !reloadCmdRe.MatchString(yaml) {
+		return "", fmt.Errorf("atom_rules.yaml has no reload command")
+	}
+	return reloadCmdRe.ReplaceAllString(yaml, "${1}["+strings.ReplaceAll(cmd, "$", "$$")+"]"), nil
+}

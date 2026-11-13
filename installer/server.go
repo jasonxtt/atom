@@ -215,9 +215,12 @@ func (s *Server) handleFree(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "53 端口上已经没有这个占用者")
 		return
 	}
-	if req.Kind == "resolved" {
+	switch req.Kind {
+	case "resolved":
 		err = freeResolvedStub(s.ins.Paths, stderrLogger{})
-	} else {
+	case "openrc":
+		err = freeOpenRCService(s.ins.Paths, target.Unit, stderrLogger{})
+	default:
 		err = freeUnit(s.ins.Paths, target.Unit, stderrLogger{})
 	}
 	if err != nil {
@@ -234,7 +237,8 @@ func (s *Server) busy() func(port int) string {
 		return func(int) string { return "" }
 	}
 	return func(port int) string {
-		if occ := occupantsOf(ls, port, unitOfPID); len(occ) > 0 {
+		unitOf, openrc := serviceOfPID()
+		if occ := occupantsOf(ls, port, unitOf, openrc); len(occ) > 0 {
 			return occ[0].Proc
 		}
 		return ""

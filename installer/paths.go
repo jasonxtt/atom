@@ -10,10 +10,14 @@ import (
 type Paths struct {
 	Root    string
 	UnitDir string
+	OpenRC  bool // OpenRC service scripts in UnitDir (/etc/init.d) instead of systemd units
 }
 
 func defaultPaths() Paths {
-	p := Paths{Root: "/opt/atom", UnitDir: "/etc/systemd/system"}
+	p := Paths{Root: "/opt/atom", UnitDir: "/etc/systemd/system", OpenRC: useOpenRC()}
+	if p.OpenRC {
+		p.UnitDir = "/etc/init.d"
+	}
 	if v := os.Getenv("ATOM_ROOT"); v != "" {
 		p.Root = v
 	}
@@ -32,8 +36,31 @@ func (p Paths) Backup() string         { return filepath.Join(p.Root, "backup") 
 func (p Paths) Pkg() string            { return filepath.Join(p.Root, "pkg") }
 func (p Paths) State() string          { return p.Etc("install.json") }
 func (p Paths) Changes() string        { return p.Etc("changes.json") }
-func (p Paths) DNSUnit() string        { return filepath.Join(p.UnitDir, dnsUnitName) }
-func (p Paths) SingBoxUnit() string    { return filepath.Join(p.UnitDir, singBoxUnitName) }
+func (p Paths) DNSUnit() string        { return p.unitFile(dnsUnitName) }
+func (p Paths) SingBoxUnit() string    { return p.unitFile(singBoxUnitName) }
+
+// unitFile is the service definition: <name>.service for systemd, the script <name> for OpenRC.
+func (p Paths) unitFile(name string) string {
+	if p.OpenRC {
+		name = rcName(name)
+	}
+	return filepath.Join(p.UnitDir, name)
+}
+
+func (p Paths) Init() initSystem {
+	if p.OpenRC {
+		return openRCInit{}
+	}
+	return systemdInit{}
+}
+
+// unitMode is the mode of a service definition: OpenRC scripts are programs.
+func (p Paths) unitMode() os.FileMode {
+	if p.OpenRC {
+		return 0o755
+	}
+	return 0o644
+}
 
 const (
 	dnsUnitName     = "atom-dns.service"

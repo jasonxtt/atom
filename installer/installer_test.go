@@ -339,18 +339,18 @@ func TestParseSSAndOccupants(t *testing.T) {
 		}
 		return "ssh.service"
 	}
-	occ := occupantsOf(ls, 53, unit)
+	occ := occupantsOf(ls, 53, unit, false)
 	if len(occ) != 1 || occ[0].Kind != "resolved" || occ[0].PID != 278 || len(occ[0].Addrs) != 3 {
 		t.Errorf("port 53 (atom's own listener does not count): %+v", occ)
 	}
-	occ = occupantsOf(ls, 22, unit)
+	occ = occupantsOf(ls, 22, unit, false)
 	if len(occ) != 1 || occ[0].Kind != "unit" || occ[0].Unit != "ssh.service" {
 		t.Errorf("port 22: %+v", occ)
 	}
-	if occ := occupantsOf(ls, 80, unit); len(occ) != 0 {
+	if occ := occupantsOf(ls, 80, unit, false); len(occ) != 0 {
 		t.Errorf("port 80: %+v", occ)
 	}
-	if occ := occupantsOf(ls, 546, unit); len(occ) != 1 || occ[0].Kind != "" {
+	if occ := occupantsOf(ls, 546, unit, false); len(occ) != 1 || occ[0].Kind != "" {
 		t.Errorf("a socket without a process cannot be handled: %+v", occ)
 	}
 }
@@ -427,7 +427,7 @@ func TestRefreshData(t *testing.T) {
 	write(pkg, "README.md", "doc")
 	write(pkg, "cache/.gitkeep", "")
 
-	if err := refreshData(pkg, data, 80); err != nil {
+	if err := refreshData(pkg, data, 80, ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := read(data, "config_custom.yaml"); !strings.Contains(got, "0.0.0.0:80") {
@@ -449,7 +449,7 @@ func TestRefreshData(t *testing.T) {
 	write(pkg, "sub_config/a.yaml", "newer-a")
 	write(pkg, "rule/atom_catalog.json", "newer-catalog")
 	write(pkg, "rule/new_list.txt", "brand-new")
-	if err := refreshData(pkg, data, 8080); err != nil {
+	if err := refreshData(pkg, data, 8080, ""); err != nil {
 		t.Fatal(err)
 	}
 	for rel, want := range map[string]string{
@@ -1028,5 +1028,237 @@ func TestCheckArch(t *testing.T) {
 		if checkArch(a) == "" {
 			t.Errorf("%s accepted", a)
 		}
+	}
+}
+
+func TestRenderOpenRCServices(t *testing.T) {
+	p := Paths{Root: "/opt/atom", OpenRC: true}
+	dns := renderDNSInit(p, "/usr/sbin/nft", "/sbin/sysctl", false, "")
+	for _, want := range []string{"#!/sbin/openrc-run", "supervisor=supervise-daemon", "respawn_max=0", "command=/opt/atom/bin/atomdns",
+		`command_args="start -d /opt/atom/data -c config_custom.yaml"`, "need net", "/var/log/atom/atom-dns.log", "start_pre()",
+		"/usr/sbin/nft -f /opt/atom/etc/atom.nft || return 1", "/opt/atom/lib/policy-route.sh || return 1"} {
+		if !strings.Contains(dns, want) {
+			t.Errorf("DNS init script lacks %q:\n%s", want, dns)
+		}
+	}
+	if strings.Contains(dns, "ip_forward") || strings.Contains(dns, "atom-gateway.nft") {
+		t.Error("single NIC script must not touch NAT or ip_forward")
+	}
+	gw := renderDNSInit(p, "/usr/sbin/nft", "/sbin/sysctl", true, "eth0")
+	if !strings.Contains(gw, "/sbin/sysctl -w net.ipv4.ip_forward=1") || !strings.Contains(gw, "atom-gateway.nft") || !strings.Contains(gw, "conf/eth0/accept_redirects=0") {
+		t.Errorf("gateway script:\n%s", gw)
+	}
+	if strings.Index(gw, "atom.nft") > strings.Index(gw, "policy-route.sh") {
+		t.Error("rules are loaded before the policy routing")
+	}
+	sb := renderSingBoxInit(p)
+	for _, want := range []string{`extra_started_commands="reload"`, "--signal HUP", "supervise-daemon", "/opt/atom/data/sing-box/config.json ] ||", "run -D /opt/atom/data/sing-box -c /opt/atom/data/sing-box/config.json"} {
+		if !strings.Contains(sb, want) {
+			t.Errorf("sing-box init script lacks %q:\n%s", want, sb)
+		}
+	}
+	if p.DNSUnit() != "/etc/init.d/atom-dns" && (Paths{UnitDir: "/etc/init.d", OpenRC: true}).DNSUnit() != "/etc/init.d/atom-dns" {
+		t.Error("OpenRC script name")
+	}
+	if (Paths{UnitDir: "/u"}).SingBoxUnit() != "/u/atom-sing-box.service" {
+		t.Error("systemd unit name")
+	}
+}
+
+func TestSetReloadCommand(t *testing.T) {
+	in := "# reload: [x]\nsingbox:\n    enabled: true\n        reload: [systemctl, reload-or-restart, atom-sing-box.service]\n        other: [a]\n"
+	out, err := setReloadCommand(in, "/opt/atom/lib/reload-sing-box.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "        reload: [/opt/atom/lib/reload-sing-box.sh]\n") || !strings.Contains(out, "# reload: [x]") || !strings.Contains(out, "other: [a]") {
+		t.Errorf("%s", out)
+	}
+	if _, err := setReloadCommand("nothing: 1\n", "x"); err == nil {
+		t.Error("a file without a reload line must fail")
+	}
+	shipped, err := os.ReadFile("../atomdns/config/sub_config/atom_rules.yaml")
+	if err == nil {
+		if _, err := setReloadCommand(string(shipped), "/x"); err != nil {
+			t.Errorf("the shipped atom_rules.yaml: %v", err)
+		}
+	}
+	// refreshData applies it to atom_rules.yaml only, and only when asked
+	pkg, data := t.TempDir(), t.TempDir()
+	os.MkdirAll(filepath.Join(pkg, "sub_config"), 0o755)
+	os.WriteFile(filepath.Join(pkg, "sub_config", "atom_rules.yaml"), []byte(in), 0o644)
+	os.WriteFile(filepath.Join(pkg, "config_custom.yaml"), []byte("api:\n  http: \"0.0.0.0:80\"\n"), 0o644)
+	if err := refreshData(pkg, data, 80, "/r.sh"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(filepath.Join(data, "sub_config", "atom_rules.yaml"))
+	if !strings.Contains(string(got), "reload: [/r.sh]") {
+		t.Errorf("%s", got)
+	}
+	if err := refreshData(pkg, data, 80, ""); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = os.ReadFile(filepath.Join(data, "sub_config", "atom_rules.yaml"))
+	if !strings.Contains(string(got), "systemctl, reload-or-restart") {
+		t.Errorf("without a reload command the file is copied as it is: %s", got)
+	}
+}
+
+func TestOpenRCServiceOfPID(t *testing.T) {
+	root := t.TempDir()
+	daemons, proc := filepath.Join(root, "daemons"), filepath.Join(root, "proc")
+	pidfile := func(name string, pid int) {
+		os.MkdirAll(filepath.Join(daemons, name), 0o755)
+		pf := filepath.Join(root, name+".pid")
+		os.WriteFile(pf, []byte(fmt.Sprintf("%d\n", pid)), 0o644)
+		os.WriteFile(filepath.Join(daemons, name, "001"), []byte("exec=/x\nargv_0=/x\npidfile="+pf+"\n"), 0o644)
+	}
+	stat := func(pid, ppid int, comm string) {
+		os.MkdirAll(filepath.Join(proc, fmt.Sprint(pid)), 0o755)
+		os.WriteFile(filepath.Join(proc, fmt.Sprint(pid), "stat"), []byte(fmt.Sprintf("%d (%s) S %d 1 1 0\n", pid, comm, ppid)), 0o644)
+	}
+	pidfile("atomdns", 500)    // the pidfile holds the process itself
+	pidfile("supervised", 600) // the pidfile holds a supervisor, the listener is its child
+	stat(500, 1, "atomdns")
+	stat(600, 1, "supervise-daemon")
+	stat(601, 600, "a (b) c") // comm with spaces and parentheses
+	stat(602, 601, "worker")
+	stat(700, 1, "stray")
+	for pid, want := range map[int]string{500: "atomdns", 602: "supervised", 601: "supervised", 700: "", 999: ""} {
+		if got := openrcServiceOf(daemons, proc, pid); got != want {
+			t.Errorf("pid %d: %q, want %q", pid, got, want)
+		}
+	}
+	// the Kind of such an occupant is openrc; our own services do not count
+	ls := []Listener{{Proto: "udp", Addr: "0.0.0.0:53", Port: 53, PID: 500, Proc: "atomdns"}, {Proto: "udp", Addr: "*:53", Port: 53, PID: 602, Proc: "x"}}
+	occ := occupantsOf(ls, 53, func(pid int) string { return openrcServiceOf(daemons, proc, pid) }, true)
+	if len(occ) != 2 || occ[0].Kind != "openrc" || occ[0].Unit != "atomdns" {
+		t.Errorf("%+v", occ)
+	}
+	occ = occupantsOf(ls, 53, func(pid int) string { return "atom-dns" }, true)
+	if len(occ) != 0 {
+		t.Errorf("our own service is not an occupant: %+v", occ)
+	}
+}
+
+func TestResolvConfAndRunlevels(t *testing.T) {
+	for text, want := range map[string]bool{
+		"nameserver 127.0.0.1\n":                       true,
+		"# c\nnameserver ::1\nnameserver 127.0.0.53\n": true,
+		"nameserver 127.0.0.1\nnameserver 10.0.0.3\n":  false,
+		"nameserver 10.0.0.3\n":                        false,
+		"search lan\n":                                 false,
+		"":                                             false,
+	} {
+		if loopbackOnly(text) != want {
+			t.Errorf("%q: loopbackOnly = %v", text, !want)
+		}
+	}
+	rl := t.TempDir()
+	for _, d := range []string{"default/atomdns", "boot/atomdns", "default/crond", "sysinit/dev"} {
+		os.MkdirAll(filepath.Dir(filepath.Join(rl, d)), 0o755)
+		os.Symlink("/etc/init.d/x", filepath.Join(rl, d))
+	}
+	if got := runlevelsOf(rl, "atomdns"); strings.Join(got, ",") != "boot,default" {
+		t.Errorf("%v", got)
+	}
+	if got := runlevelsOf(rl, "nothing"); len(got) != 0 {
+		t.Errorf("%v", got)
+	}
+}
+
+func TestFreeOpenRCServiceAndResolvConfRestore(t *testing.T) {
+	root, conf := t.TempDir(), filepath.Join(t.TempDir(), "resolv.conf")
+	resolvConfPath = conf
+	defer func() { resolvConfPath = "/etc/resolv.conf" }()
+	p := Paths{Root: root, OpenRC: true}
+	if err := freeOpenRCService(p, "atom-dns", &recLogger{}); err == nil {
+		t.Error("our own service must not be freed")
+	}
+	if err := freeOpenRCService(p, "a/b", &recLogger{}); err == nil {
+		t.Error("a path is not a service name")
+	}
+	// the saved resolv.conf comes back, and the backup goes
+	if err := writeFileAtomic(p.Etc("resolv.conf.orig"), []byte("nameserver 127.0.0.1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(conf, []byte("nameserver 10.0.0.1\n"), 0o644)
+	ch := &Changes{ResolvConfSaved: true}
+	if err := restoreResolvConf(p, ch, &recLogger{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(conf); string(got) != "nameserver 127.0.0.1\n" || ch.ResolvConfSaved {
+		t.Errorf("resolv.conf %q, saved=%v", got, ch.ResolvConfSaved)
+	}
+	if _, err := os.Stat(p.Etc("resolv.conf.orig")); err == nil {
+		t.Error("the backup is removed once restored")
+	}
+	if err := restoreResolvConf(p, ch, &recLogger{}); err != nil {
+		t.Errorf("nothing saved, nothing to do: %v", err)
+	}
+}
+
+func TestMissingDeps(t *testing.T) {
+	has := func(names ...string) func(string) bool {
+		return func(n string) bool {
+			for _, x := range names {
+				if x == n {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	if got := missingDeps(true, false, has("ip"), has()); strings.Join(got, ",") != "nftables,iproute2" {
+		t.Errorf("Alpine: the busybox ip does not count: %v", got)
+	}
+	if got := missingDeps(true, true, has("nft"), has("iproute2")); len(got) != 0 {
+		t.Errorf("Alpine with everything: %v", got)
+	}
+	if got := missingDeps(false, true, has(), has()); strings.Join(got, ",") != "nftables,iproute2,procps" {
+		t.Errorf("Debian: %v", got)
+	}
+	if got := missingDeps(false, false, has("nft", "ip"), has()); len(got) != 0 {
+		t.Errorf("Debian: %v", got)
+	}
+}
+
+func TestOldChangesFileStillReads(t *testing.T) {
+	p := Paths{Root: t.TempDir()}
+	os.MkdirAll(p.Etc(""), 0o755)
+	os.WriteFile(p.Changes(), []byte(`{"apt_installed": ["nftables"], "pkg_installed": ["iproute2"]}`), 0o644)
+	ch := loadChanges(p)
+	if strings.Join(ch.PkgInstalled, ",") != "nftables,iproute2" || len(ch.AptInstalled) != 0 {
+		t.Errorf("%+v", ch)
+	}
+	saveChanges(p, ch)
+	data, _ := os.ReadFile(p.Changes())
+	if strings.Contains(string(data), "apt_installed") {
+		t.Errorf("the old field is not written again: %s", data)
+	}
+}
+
+func TestAlpineAndContainer(t *testing.T) {
+	for _, v := range []string{"3.19.0", "3.23.5", "4.0"} {
+		if p := checkOS(parseOSRelease("ID=alpine\nVERSION_ID=" + v)); p != "" {
+			t.Errorf("Alpine %s: %s", v, p)
+		}
+	}
+	for _, v := range []string{"3.18.9", "3.9", "2.7"} {
+		if checkOS(parseOSRelease("ID=alpine\nVERSION_ID="+v)) == "" {
+			t.Errorf("Alpine %s must be refused", v)
+		}
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, ".dockerenv")
+	if inContainer([]string{marker}, []byte("PATH=/bin\x00HOME=/root\x00")) {
+		t.Error("not a container")
+	}
+	if !inContainer([]string{marker}, []byte("PATH=/bin\x00container=lxc\x00")) {
+		t.Error("container= in PID 1's environment")
+	}
+	os.WriteFile(marker, nil, 0o644)
+	if !inContainer([]string{marker}, nil) {
+		t.Error("marker file")
 	}
 }

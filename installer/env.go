@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -33,7 +34,7 @@ func parseOSRelease(text string) map[string]string {
 	return out
 }
 
-// checkOS accepts Debian 12+ and Ubuntu 22.04+.
+// checkOS accepts Debian 12+, Ubuntu 22.04+ and Alpine 3.19+.
 func checkOS(rel map[string]string) string {
 	id, ver := rel["ID"], rel["VERSION_ID"]
 	major, _, _ := strings.Cut(ver, ".")
@@ -47,10 +48,32 @@ func checkOS(rel map[string]string) string {
 		if n < 22 {
 			return fmt.Sprintf("需要 Ubuntu 22.04 或更新，当前 Ubuntu %s", ver)
 		}
+	case "alpine":
+		_, minorStr, _ := strings.Cut(ver, ".")
+		minorStr, _, _ = strings.Cut(minorStr, ".")
+		minor, _ := strconv.Atoi(minorStr)
+		if n < 3 || (n == 3 && minor < 19) {
+			return fmt.Sprintf("需要 Alpine 3.19 或更新，当前 Alpine %s", ver)
+		}
 	default:
-		return fmt.Sprintf("只支持 Debian 和 Ubuntu，当前是 %s", rel["PRETTY_NAME"])
+		return fmt.Sprintf("只支持 Debian、Ubuntu 和 Alpine，当前是 %s", rel["PRETTY_NAME"])
 	}
 	return ""
+}
+
+// inContainer: one of the marker files exists, or PID 1 has a container= variable (LXC and others).
+func inContainer(markers []string, pid1Environ []byte) bool {
+	for _, f := range markers {
+		if _, err := os.Stat(f); err == nil {
+			return true
+		}
+	}
+	for _, kv := range strings.Split(string(pid1Environ), "\x00") {
+		if strings.HasPrefix(kv, "container=") {
+			return true
+		}
+	}
+	return false
 }
 
 func checkArch(goarch string) string {
@@ -72,8 +95,12 @@ func checkSystem() SystemInfo {
 	if p := checkArch(runtime.GOARCH); p != "" {
 		info.Problems = append(info.Problems, p)
 	}
-	if _, err := os.Stat("/run/systemd/system"); err != nil {
-		info.Problems = append(info.Problems, "需要 systemd")
+	if _, err := os.Stat("/run/systemd/system"); err != nil && !useOpenRC() {
+		info.Problems = append(info.Problems, "需要 systemd 或 OpenRC")
+	}
+	environ, _ := os.ReadFile("/proc/1/environ")
+	if inContainer([]string{"/.dockerenv", "/run/.containerenv"}, environ) {
+		info.Problems = append(info.Problems, "不支持在 Docker / LXC 容器里运行")
 	}
 	if os.Geteuid() != 0 {
 		info.Problems = append(info.Problems, "需要 root 权限")
@@ -210,15 +237,59 @@ type Occupant struct {
 	PID   int      `json:"pid"`
 	Unit  string   `json:"unit"`
 	Addrs []string `json:"addrs"`
-	// Kind is "resolved" for the systemd-resolved stub, "unit" for another service that can be stopped
+	// Kind is "resolved" for the systemd-resolved stub, "unit" (systemd) or "openrc" for another service that can be stopped
 	// and disabled, "" for a process the installer cannot deal with.
 	Kind string `json:"kind"`
 }
 
-func isOurUnit(unit string) bool { return unit == dnsUnitName || unit == singBoxUnitName }
+func isOurUnit(unit string) bool {
+	unit = rcName(unit)
+	return unit == rcName(dnsUnitName) || unit == rcName(singBoxUnitName)
+}
+
+// openrcServiceOf is the OpenRC service a process belongs to: the service whose pidfile (named in
+// <daemonsDir>/<service>/001) holds the process or one of its ancestors ("" if none). procDir is /proc.
+func openrcServiceOf(daemonsDir, procDir string, pid int) string {
+	byPID := map[int]string{}
+	dirs, _ := os.ReadDir(daemonsDir)
+	for _, d := range dirs {
+		data, err := os.ReadFile(filepath.Join(daemonsDir, d.Name(), "001"))
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			pf, ok := strings.CutPrefix(line, "pidfile=")
+			if !ok {
+				continue
+			}
+			if b, err := os.ReadFile(strings.Trim(pf, `"'`)); err == nil {
+				if n, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+					byPID[n] = d.Name()
+				}
+			}
+		}
+	}
+	for i := 0; pid > 1 && i < 64; i++ {
+		if svc, ok := byPID[pid]; ok {
+			return svc
+		}
+		data, err := os.ReadFile(filepath.Join(procDir, strconv.Itoa(pid), "stat"))
+		if err != nil {
+			return ""
+		}
+		// "pid (comm) S ppid ...": comm may hold spaces and parentheses, so cut after the last ")"
+		s := string(data)
+		f := strings.Fields(s[strings.LastIndex(s, ")")+1:])
+		if len(f) < 2 {
+			return ""
+		}
+		pid, _ = strconv.Atoi(f[1])
+	}
+	return ""
+}
 
 // occupantsOf groups the listeners on a port by process; ours (a failed earlier try) do not count.
-func occupantsOf(ls []Listener, port int, unitOf func(pid int) string) []Occupant {
+func occupantsOf(ls []Listener, port int, unitOf func(pid int) string, openrc bool) []Occupant {
 	byPID := map[int]*Occupant{}
 	var order []int
 	for _, l := range ls {
@@ -243,6 +314,8 @@ func occupantsOf(ls []Listener, port int, unitOf func(pid int) string) []Occupan
 			continue
 		}
 		switch {
+		case openrc && o.Unit != "":
+			o.Kind = "openrc"
 		case o.Unit == "systemd-resolved.service":
 			o.Kind = "resolved"
 		case o.Unit != "" && o.Unit != "atom-installer.service":
@@ -253,12 +326,21 @@ func occupantsOf(ls []Listener, port int, unitOf func(pid int) string) []Occupan
 	return out
 }
 
+// serviceOfPID finds the service of a process for this machine's service manager.
+func serviceOfPID() (unitOf func(pid int) string, openrc bool) {
+	if useOpenRC() {
+		return func(pid int) string { return openrcServiceOf("/run/openrc/daemons", "/proc", pid) }, true
+	}
+	return unitOfPID, false
+}
+
 func portOccupants(port int) ([]Occupant, error) {
 	ls, err := listeners()
 	if err != nil {
 		return nil, err
 	}
-	return occupantsOf(ls, port, unitOfPID), nil
+	unitOf, openrc := serviceOfPID()
+	return occupantsOf(ls, port, unitOf, openrc), nil
 }
 
 func privateAddrs() []string {

@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // hasRecords: install.json or changes.json is there, so there is something to take back.
@@ -28,8 +27,7 @@ func uninstall(p Paths, purge bool, log Logger) error {
 		for _, f := range []string{p.DNSUnit(), p.SingBoxUnit()} {
 			os.Remove(f)
 		}
-		_ = runCmd(log, 30*time.Second, "systemctl", "daemon-reload")
-		_ = runCmd(log, 30*time.Second, "systemctl", "reset-failed", dnsUnitName, singBoxUnitName)
+		p.Init().Forget(log, dnsUnitName, singBoxUnitName)
 	}
 
 	ch := loadChanges(p)
@@ -38,9 +36,13 @@ func uninstall(p Paths, purge bool, log Logger) error {
 		log.Logf("还原 systemd-resolved 失败：%v", err)
 		failed = append(failed, "systemd-resolved")
 	}
+	if err := restoreResolvConf(p, ch, log); err != nil {
+		log.Logf("还原 /etc/resolv.conf 失败：%v", err)
+		failed = append(failed, "/etc/resolv.conf")
+	}
 	var left []UnitState
 	for _, u := range ch.DisabledUnits {
-		if err := restoreUnit(u, log); err != nil {
+		if err := restoreUnit(p, u, log); err != nil {
 			log.Logf("还原 %s 失败：%v", u.Unit, err)
 			left = append(left, u)
 			failed = append(failed, u.Unit)
@@ -53,8 +55,8 @@ func uninstall(p Paths, purge bool, log Logger) error {
 		}
 		return fmt.Errorf("没有还原：%s。记录和程序都还在，处理好之后可以再运行一次 uninstall", strings.Join(failed, "、"))
 	}
-	if len(ch.AptInstalled) > 0 {
-		log.Logf("安装时装过的软件包没有卸载：%v", ch.AptInstalled)
+	if len(ch.PkgInstalled) > 0 {
+		log.Logf("安装时装过的软件包没有卸载：%v", ch.PkgInstalled)
 	}
 	if purge {
 		log.Logf("删除 %s（含数据）", p.Root)

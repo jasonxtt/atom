@@ -330,7 +330,7 @@ function viewEnv() {
     const what = esc(o.proc || '未知进程') + (o.pid ? ` · PID ${o.pid}` : '');
     let btn = '';
     if (o.kind === 'resolved') btn = `<button class="btn pri sm" data-act="free" data-i="${i}">停用系统 DNS 监听</button>`;
-    else if (o.kind === 'unit') btn = `<button class="btn pri sm" data-act="free" data-i="${i}">停止并禁用 ${esc(o.unit)}</button>`;
+    else if (o.kind === 'unit' || o.kind === 'openrc') btn = `<button class="btn pri sm" data-act="free" data-i="${i}">停止并禁用 ${esc(o.unit)}</button>`;
     else btn = '<span class="tag">需手动停止</span>';
     if (S.freeing === i) btn = `<span class="muted">${spin}</span>`;
     h += `<div class="check">${badge('bad', I.bad)}<div class="grow">53 端口被占用<div class="s">${what}${(o.addrs || []).length ? ' · ' + esc(o.addrs.join(', ')) : ''}</div></div>${btn}</div>`;

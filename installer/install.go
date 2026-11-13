@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -192,32 +193,69 @@ func (ins *Installer) finalize() error {
 	return nil
 }
 
-func (ins *Installer) stepDeps(cfg Config, j *Job) error {
+func isAlpine() bool {
+	_, err := os.Stat("/etc/alpine-release")
+	return err == nil
+}
+
+// missingDeps lists the packages to install. On Alpine iproute2 is always wanted: the busybox ip may lack
+// policy routing and there is no ss.
+func missingDeps(alpine, needSysctl bool, haveBin func(string) bool, havePkg func(string) bool) []string {
 	var need []string
-	if _, err := exec.LookPath("nft"); err != nil {
+	if !haveBin("nft") {
 		need = append(need, "nftables")
 	}
-	if _, err := exec.LookPath("ip"); err != nil {
+	if alpine {
+		if !havePkg("iproute2") {
+			need = append(need, "iproute2")
+		}
+		return need
+	}
+	if !haveBin("ip") {
 		need = append(need, "iproute2")
 	}
-	if cfg.Topology == "gateway" || cfg.ReplyVia {
-		if _, err := exec.LookPath("sysctl"); err != nil {
-			need = append(need, "procps")
-		}
+	if needSysctl && !haveBin("sysctl") {
+		need = append(need, "procps")
 	}
+	return need
+}
+
+// ensureDeps installs what is missing and records it, so that it is known what the installer brought.
+func ensureDeps(p Paths, needSysctl bool, j Logger) error {
+	alpine := isAlpine()
+	need := missingDeps(alpine, needSysctl,
+		func(n string) bool { _, err := exec.LookPath(n); return err == nil },
+		func(n string) bool { _, err := quietCmd("apk", "info", "-e", n); return err == nil })
 	if len(need) == 0 {
 		j.Logf("依赖都在")
 		return nil
 	}
-	if err := runCmd(j, 5*time.Minute, "apt-get", "update"); err != nil {
-		return err
+	if alpine {
+		if err := runCmd(j, 5*time.Minute, "apk", "update"); err != nil {
+			return err
+		}
+		if err := runCmd(j, 10*time.Minute, "apk", append([]string{"add"}, need...)...); err != nil {
+			return err
+		}
+	} else {
+		if err := runCmd(j, 5*time.Minute, "apt-get", "update"); err != nil {
+			return err
+		}
+		if err := runCmd(j, 10*time.Minute, "apt-get", append([]string{"install", "-y", "--no-install-recommends"}, need...)...); err != nil {
+			return err
+		}
 	}
-	if err := runCmd(j, 10*time.Minute, "apt-get", append([]string{"install", "-y", "--no-install-recommends"}, need...)...); err != nil {
-		return err
+	ch := loadChanges(p)
+	for _, n := range need {
+		if !slices.Contains(ch.PkgInstalled, n) {
+			ch.PkgInstalled = append(ch.PkgInstalled, n)
+		}
 	}
-	ch := loadChanges(ins.Paths)
-	ch.AptInstalled = append(ch.AptInstalled, need...)
-	return saveChanges(ins.Paths, ch)
+	return saveChanges(p, ch)
+}
+
+func (ins *Installer) stepDeps(cfg Config, j *Job) error {
+	return ensureDeps(ins.Paths, cfg.Topology == "gateway" || cfg.ReplyVia, j)
 }
 
 // atom-installer first: once anything is installed, the uninstaller is there too.
@@ -237,7 +275,11 @@ func (ins *Installer) installBinaries(log Logger) error {
 func (ins *Installer) stepBinaries(j *Job) error { return ins.installBinaries(j) }
 
 func (ins *Installer) installData(panelPort int, log Logger) error {
-	if err := refreshData(filepath.Join(ins.PkgDir, "config"), ins.Paths.Data(), panelPort); err != nil {
+	reload := ""
+	if ins.Paths.OpenRC {
+		reload = ins.Paths.Lib("reload-sing-box.sh")
+	}
+	if err := refreshData(filepath.Join(ins.PkgDir, "config"), ins.Paths.Data(), panelPort, reload); err != nil {
 		return fmt.Errorf("配置: %w", err)
 	}
 	log.Logf("配置 → %s", ins.Paths.Data())
@@ -292,13 +334,20 @@ func (ins *Installer) writeNetworkFiles(st *InstallState, log Logger) error {
 			return fmt.Errorf("nft 规则检查没通过: %w", err)
 		}
 	}
-	if err := writeFileAtomic(p.DNSUnit(), []byte(renderDNSUnit(p, st.NftBin, st.SysctlBin, st.Topology == "gateway", replyDev)), 0o644); err != nil {
+	dnsDef, sbDef := renderDNSUnit, renderSingBoxUnit
+	if p.OpenRC {
+		dnsDef, sbDef = renderDNSInit, renderSingBoxInit
+		if err := writeFileAtomic(p.Lib("reload-sing-box.sh"), []byte(renderReloadScript()), 0o755); err != nil {
+			return err
+		}
+	}
+	if err := writeFileAtomic(p.DNSUnit(), []byte(dnsDef(p, st.NftBin, st.SysctlBin, st.Topology == "gateway", replyDev)), p.unitMode()); err != nil {
 		return err
 	}
-	if err := writeFileAtomic(p.SingBoxUnit(), []byte(renderSingBoxUnit(p)), 0o644); err != nil {
+	if err := writeFileAtomic(p.SingBoxUnit(), []byte(sbDef(p)), p.unitMode()); err != nil {
 		return err
 	}
-	return runCmd(log, 30*time.Second, "systemctl", "daemon-reload")
+	return p.Init().Reload(log)
 }
 
 func lookPathOr(name, fallback string) string {
@@ -433,21 +482,19 @@ func (ins *Installer) stepNetwork(cfg Config, j *Job) error {
 }
 
 func (ins *Installer) stepStart(cfg Config, j *Job) error {
-	if err := runCmd(j, 30*time.Second, "systemctl", "enable", singBoxUnitName); err != nil {
-		return err
-	}
-	if err := runCmd(j, 30*time.Second, "systemctl", "enable", dnsUnitName); err != nil {
+	init := ins.Paths.Init()
+	if err := init.Enable(j, singBoxUnitName, dnsUnitName); err != nil {
 		return err
 	}
 	// A configuration left by an earlier installation is in sync with the settings atomdns finds, so atomdns
 	// would not start sing-box: start it here. Without one, atomdns applies the first configuration and starts it.
 	if _, err := os.Stat(filepath.Join(ins.Paths.Data(), "sing-box", "config.json")); err == nil {
-		if err := runCmd(j, 60*time.Second, "systemctl", "restart", singBoxUnitName); err != nil {
+		if err := init.Restart(j, singBoxUnitName); err != nil {
 			ins.journal(j, singBoxUnitName)
 			return err
 		}
 	}
-	if err := runCmd(j, 60*time.Second, "systemctl", "restart", dnsUnitName); err != nil {
+	if err := init.Restart(j, dnsUnitName); err != nil {
 		ins.journal(j, dnsUnitName)
 		return err
 	}
@@ -461,8 +508,7 @@ func (ins *Installer) stepStart(cfg Config, j *Job) error {
 }
 
 func (ins *Installer) journal(j *Job, unit string) {
-	out, _ := quietCmd("journalctl", "-u", unit, "-n", "15", "--no-pager")
-	for _, l := range strings.Split(out, "\n") {
+	for _, l := range strings.Split(ins.Paths.Init().Logs(unit), "\n") {
 		j.Logf("  %s", l)
 	}
 }
@@ -586,7 +632,7 @@ func (ins *Installer) stepCheck(cfg Config, j *Job) error {
 		return fmt.Errorf("%s", msg)
 	}
 	for _, u := range []string{dnsUnitName, singBoxUnitName} {
-		if out, _ := quietCmd("systemctl", "is-active", u); out != "active" {
+		if out := ins.Paths.Init().IsActive(u); out != "active" {
 			return fmt.Errorf("%s 不是 active（%s）", u, out)
 		}
 	}
@@ -664,7 +710,9 @@ func teardownNetwork(p Paths, log Logger) {
 			log.Logf("  （忽略）%v", err)
 		}
 	}
-	ignore("systemctl", "disable", "--now", dnsUnitName, singBoxUnitName)
+	if err := p.Init().DisableNow(log, dnsUnitName, singBoxUnitName); err != nil {
+		log.Logf("  （忽略）%v", err)
+	}
 	ignore("nft", "delete", "table", "inet", "atom")
 	ignore("nft", "delete", "table", "ip", "atom_nat")
 	ignore("ip", "rule", "del", "fwmark", fwmark, "lookup", routeTable, "priority", routePriority)

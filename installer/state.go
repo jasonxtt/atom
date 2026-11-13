@@ -45,7 +45,11 @@ type Changes struct {
 	// accept_redirects values (by /proc path) it turned off for it.
 	Reply           bool              `json:"reply,omitempty"`
 	RedirectsBefore map[string]string `json:"redirects_before,omitempty"`
-	AptInstalled    []string          `json:"apt_installed,omitempty"`
+	PkgInstalled    []string          `json:"pkg_installed,omitempty"` // apt or apk packages the installer brought
+	AptInstalled    []string          `json:"apt_installed,omitempty"` // the old name of PkgInstalled, read only
+	// ResolvConfSaved: /etc/resolv.conf held only loopback addresses, was replaced and its content is in
+	// etc/resolv.conf.orig (OpenRC).
+	ResolvConfSaved bool `json:"resolv_conf_saved,omitempty"`
 }
 
 // UnitState is a service the installer stopped to free a port, as it was before.
@@ -53,6 +57,9 @@ type UnitState struct {
 	Unit       string `json:"unit"`
 	WasEnabled bool   `json:"was_enabled"`
 	WasActive  bool   `json:"was_active"`
+	// Runlevels (OpenRC) are the runlevels the service was in; it is put back into each of them.
+	Runlevels []string `json:"runlevels,omitempty"`
+	OpenRC    bool     `json:"openrc,omitempty"`
 }
 
 func writeJSON(path string, v any) error {
@@ -85,6 +92,10 @@ func loadState(p Paths) (*InstallState, error) {
 func loadChanges(p Paths) *Changes {
 	var c Changes
 	_ = readJSON(p.Changes(), &c)
+	if len(c.AptInstalled) > 0 { // written by an installer before apk support
+		c.PkgInstalled = append(c.AptInstalled, c.PkgInstalled...)
+		c.AptInstalled = nil
+	}
 	return &c
 }
 
