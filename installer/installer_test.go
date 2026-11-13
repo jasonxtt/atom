@@ -965,3 +965,16 @@ func TestReplyViaRouter(t *testing.T) {
 		t.Errorf("%v", got)
 	}
 }
+
+func TestCheckArch(t *testing.T) {
+	for _, a := range []string{"amd64", "arm64"} {
+		if p := checkArch(a); p != "" {
+			t.Errorf("%s refused: %s", a, p)
+		}
+	}
+	for _, a := range []string{"arm", "386", "riscv64"} {
+		if checkArch(a) == "" {
+			t.Errorf("%s accepted", a)
+		}
+	}
+}

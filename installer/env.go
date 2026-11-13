@@ -53,6 +53,13 @@ func checkOS(rel map[string]string) string {
 	return ""
 }
 
+func checkArch(goarch string) string {
+	if goarch != "amd64" && goarch != "arm64" {
+		return "只支持 x86_64 和 aarch64"
+	}
+	return ""
+}
+
 func checkSystem() SystemInfo {
 	info := SystemInfo{Arch: runtime.GOARCH, Problems: []string{}}
 	info.Hostname, _ = os.Hostname()
@@ -62,8 +69,8 @@ func checkSystem() SystemInfo {
 	if p := checkOS(rel); p != "" {
 		info.Problems = append(info.Problems, p)
 	}
-	if runtime.GOARCH != "amd64" {
-		info.Problems = append(info.Problems, "只支持 x86_64")
+	if p := checkArch(runtime.GOARCH); p != "" {
+		info.Problems = append(info.Problems, p)
 	}
 	if _, err := os.Stat("/run/systemd/system"); err != nil {
 		info.Problems = append(info.Problems, "需要 systemd")
