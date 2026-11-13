@@ -472,6 +472,7 @@ DNS 和代理在同一台 VM 上。客户端的 DNS 指向这台 VM；FakeIP 网
   1. 环境：系统（Debian 12+、Ubuntu 22.04+、x86_64、systemd、root）；53 端口被占时列出占用者并给按钮：systemd-resolved 的 stub 写 drop-in 关掉并把 `/etc/resolv.conf` 指到上游列表，其他 systemd 服务停止并禁用，不是服务的只提示；做完显示"已处理完毕"。
   2. 网络：单网卡旁路由或双网卡网关，选网卡；选网关必须勾选确认（警告 2026-11-12 改为"主路由需要把 FakeIP 网段和要代理的网段转到这台机器"）；面板端口，默认 **80**。
      - 双网卡网关另有"LAN 侧网关"和"客户端网段"（2026-11-12，用户在 atom 测试机上发现）：客户端不在 LAN 网段、经 LAN 侧的路由器过来时，本机的应答（DNS、redirect 和 TProxy 的回包、NAT 回来的包）会沿默认路由从 WAN 出去。向导按本机已有的、经 LAN 网卡的路由预填这两项；安装器在 `policy-route.sh` 里对每个网段写 `ip route replace <网段> via <LAN 侧网关> dev <LAN 网卡>`，随 `atom-dns.service` 每次启动加回。没用连接标记改道：atomdns 的 UDP 监听在通配地址、按路由选源地址，改道改不了已经选成 WAN 地址的源，DNS 仍然不通。都留空表示客户端都在 LAN 网段。
+     - 单网卡旁路由可以勾"回包经主路由"（2026-11-14，用户定），填主路由地址（默认是 LAN 网卡默认路由的网关）：导入 sing-box 的连接打连接标记，回包按标记经表 234 交给主路由，主路由能看到两个方向的包；同时关掉 LAN 网卡接收 ICMP 重定向。默认不勾。规则见 deploy-nft.md 3.4。
      - 所有权：网段原来就有同一网关、同一网卡的路由，就算机器自己的，卸载不删；网关不同就拒绝安装。安装器加的记在 `changes.json` 的 `routes`，拆网络时只删这些；重装时不再需要的旧路由当场删掉。
      - 面板只给 LAN（2026-11-12，用户定）：双网卡网关的 `atom-gateway.nft` 在 WAN 网卡上丢掉发往面板端口的 TCP；atomdns 仍监听所有地址，安装器和升级经 127.0.0.1 调用接口，LAN 地址变了也不受影响。完成页把浏览器带到 LAN 地址。实测（atom 测试机，0.1.3 → 0.1.4 升级）：从 LAN 打开面板 200、从 WAN 被拦，经 WAN 的 SSH 不受影响，客户端路由随升级保留。没处理：DNS 53 和 mixed 代理端口在 WAN 上照样开着。
   3. DNS：国内、国外上游（默认值是产品配置里的，只在和现在的不同时才写）。
@@ -507,7 +508,7 @@ v0 不做 IPv6 FakeIP，被代理的域名只返回 IPv4。
 - **规则**（2026-11-12 改）：nft 表 `inet atom`，`prerouting` 上只看局域网网卡进来、目标不是本机地址（也不是广播、组播）的 IPv4 包：TCP 全部 redirect 到 7892，UDP 全部 TProxy 到 7893 并打标记 `0x233`；策略路由 `fwmark 0x233 lookup 233`，表 233 是 `local 0.0.0.0/0 dev lo`。双网卡网关另加一张 `ip atom_nat` 表（LAN → WAN 的 masquerade，现在只剩非 TCP、UDP 的包会用到，比如 ping）和 `ip_forward = 1`；单网卡旁路由不需要 `ip_forward`。原来按两个集合 `fakeip4`、`iprule4` 挑选目标，集合由 atomdns 维护（`singbox.nft_table`、`NftSets`、`sync_nft`、`status.nft`）；改成全部导入后这些都删了，规则文件每次加载整表替换，不再需要 atomdns 启动后填集合。
 - **sing-box 自己的流量**：nft 只挂 `prerouting`，本机进程的包走 `output`，不会被导回来，所以不设 `routing_mark`、也没有排除标记。本机进程访问 FakeIP 不处理。
 - **UDP 53 的写回**（联调发现，用户选的修法）：sing-box 的 TProxy 回包要用 IP_TRANSPARENT 绑定"原目标地址:端口"，atomdns 在 `*:53` 监听且没设 `SO_REUSEADDR` 时，客户端发往 FakeIP 或 IP 规则地址的 UDP 53（比如 IP 规则里有 8.8.8.8，客户端直接问它）绑定报 `EADDRINUSE`，回包发不出去。改为 atomdns 在通配地址（`[::]`、`0.0.0.0`）上的 UDP 监听设 `SO_REUSEADDR`（`rust/native-host/src/bind.rs`）。代价：同一台机器上再起一个监听通配地址的 atomdns，不会再报端口被占用，而是共用 53 端口；具体地址的监听照旧拒绝重复绑定。
-- **拓扑**：单网卡旁路由和双网卡网关都在 netns 里实测过（deploy-nft.md 第 7 节）。单网卡时主路由只看到去程，转发链里"丢弃 invalid"的规则可能丢包，这一点没有实测条件，文档给了两种处理办法。
+- **拓扑**：单网卡旁路由和双网卡网关都在 netns 里实测过（deploy-nft.md 第 7 节）。单网卡时主路由只看到去程，转发链里"丢弃 invalid"的规则可能丢包，这一点没有实测条件，文档给了三种处理办法，其中之一是安装器的"回包经主路由"选项（2026-11-14，deploy-nft.md 3.4）。
 
 ## 10. 仓库与版本
 

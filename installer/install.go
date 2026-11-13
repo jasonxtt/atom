@@ -133,15 +133,17 @@ func (ins *Installer) runInstall(cfg Config, j *Job) {
 	j.mu.Lock()
 	j.hints = hints
 	j.mu.Unlock()
+	netStarted := false // a refusal before the network step leaves an earlier installation as it is
 	err := func() error {
 		steps := []func() error{
 			func() error { return ins.stepDeps(cfg, j) },
 			func() error { return ins.stepBinaries(j) },
 			func() error { return ins.stepConfig(cfg, j) },
 			func() error {
-				if err := ins.checkRouteTable(); err != nil { // nothing has been changed yet: no teardown for a refusal
+				if err := ins.checkRouteTable(cfg); err != nil { // nothing has been changed yet: no teardown for a refusal
 					return err
 				}
+				netStarted = true
 				return ins.stepNetwork(cfg, j)
 			},
 			func() error { return ins.stepStart(cfg, j) },
@@ -163,7 +165,9 @@ func (ins *Installer) runInstall(cfg Config, j *Job) {
 	}
 	if err != nil {
 		j.Logf("安装失败：%v", err)
-		ins.rollbackNetwork(j)
+		if netStarted {
+			ins.rollbackNetwork(j)
+		}
 		j.finish(err, 0)
 		return
 	}
@@ -196,7 +200,7 @@ func (ins *Installer) stepDeps(cfg Config, j *Job) error {
 	if _, err := exec.LookPath("ip"); err != nil {
 		need = append(need, "iproute2")
 	}
-	if cfg.Topology == "gateway" {
+	if cfg.Topology == "gateway" || cfg.ReplyVia {
 		if _, err := exec.LookPath("sysctl"); err != nil {
 			need = append(need, "procps")
 		}
@@ -249,7 +253,7 @@ func (ins *Installer) stepConfig(cfg Config, j *Job) error { return ins.installD
 // writeNetworkFiles renders the nft rules, the policy-route script and the two units from the state.
 func (ins *Installer) writeNetworkFiles(st *InstallState, log Logger) error {
 	p := ins.Paths
-	nft, err := renderNft(st.LAN)
+	nft, err := renderNft(st.LAN, st.ReplyVia != "")
 	if err != nil {
 		return err
 	}
@@ -267,7 +271,13 @@ func (ins *Installer) writeNetworkFiles(st *InstallState, log Logger) error {
 	} else {
 		os.Remove(p.Etc("atom-gateway.nft"))
 	}
-	pr, err := renderPolicyRoute(st.ClientRoutes)
+	var reply *ClientRoute
+	replyDev := ""
+	if st.ReplyVia != "" {
+		reply = &ClientRoute{Net: "0.0.0.0/0", Via: st.ReplyVia, Dev: st.LAN[0]}
+		replyDev = st.LAN[0]
+	}
+	pr, err := renderPolicyRoute(st.ClientRoutes, reply)
 	if err != nil {
 		return err
 	}
@@ -282,7 +292,7 @@ func (ins *Installer) writeNetworkFiles(st *InstallState, log Logger) error {
 			return fmt.Errorf("nft 规则检查没通过: %w", err)
 		}
 	}
-	if err := writeFileAtomic(p.DNSUnit(), []byte(renderDNSUnit(p, st.NftBin, st.SysctlBin, st.Topology == "gateway")), 0o644); err != nil {
+	if err := writeFileAtomic(p.DNSUnit(), []byte(renderDNSUnit(p, st.NftBin, st.SysctlBin, st.Topology == "gateway", replyDev)), 0o644); err != nil {
 		return err
 	}
 	if err := writeFileAtomic(p.SingBoxUnit(), []byte(renderSingBoxUnit(p)), 0o644); err != nil {
@@ -323,10 +333,37 @@ func tableRoutes(out string, err error) string {
 	return out
 }
 
-func (ins *Installer) checkRouteTable() error {
+// replyRule is the rule of the reply option as `ip rule show` prints it.
+const replyRule = replyPriority + ":\tfrom all fwmark " + replyMark + " lookup " + replyTable
+
+// replyConflict is routeConflict for table 234 of the reply option: a rule to the table or for the mark that
+// is not exactly the installer's, or a route in the table other than the installer's default route (ours: the
+// record says the installer added it).
+func replyConflict(rules, routes string, ours bool) string {
+	for _, l := range strings.Split(rules, "\n") {
+		l = strings.TrimSpace(l)
+		if (strings.Contains(l, "lookup "+replyTable) || strings.Contains(l, "fwmark "+replyMark)) && l != replyRule {
+			return l
+		}
+	}
+	for _, l := range strings.Split(routes, "\n") {
+		if l = strings.TrimSpace(l); l != "" && !(ours && strings.HasPrefix(l, "default via ")) {
+			return l
+		}
+	}
+	return ""
+}
+
+func (ins *Installer) checkRouteTable(cfg Config) error {
 	rules, _ := quietCmd("ip", "rule", "show")
 	if c := routeConflict(rules, tableRoutes(quietCmd("ip", "route", "show", "table", routeTable))); c != "" {
 		return fmt.Errorf("策略路由表 %s 已经被其他配置使用（%s），安装器不会动它", routeTable, c)
+	}
+	if cfg.Topology == "bypass" && cfg.ReplyVia {
+		routes := tableRoutes(quietCmd("ip", "route", "show", "table", replyTable))
+		if c := replyConflict(rules, routes, loadChanges(ins.Paths).Reply); c != "" {
+			return fmt.Errorf("策略路由表 %s 已经被其他配置使用（%s），安装器不会动它", replyTable, c)
+		}
 	}
 	return nil
 }
@@ -341,7 +378,37 @@ func (ins *Installer) stepNetwork(cfg Config, j *Job) error {
 		}
 		st.ClientRoutes = routes
 	}
+	if cfg.Topology == "bypass" && cfg.ReplyVia {
+		st.ReplyVia = strings.TrimSpace(cfg.Router)
+	}
 	ch := loadChanges(ins.Paths)
+	if st.ReplyVia != "" {
+		if ch.RedirectsBefore == nil {
+			ch.RedirectsBefore = map[string]string{}
+		}
+		use := map[string]bool{}
+		for _, dev := range []string{"all", st.LAN[0]} {
+			f := "/proc/sys/net/ipv4/conf/" + dev + "/accept_redirects"
+			use[f] = true
+			if _, ok := ch.RedirectsBefore[f]; ok {
+				continue
+			}
+			if v, err := os.ReadFile(f); err == nil {
+				ch.RedirectsBefore[f] = strings.TrimSpace(string(v))
+			}
+		}
+		for f, v := range ch.RedirectsBefore { // the LAN interface changed: the old one gets its value back
+			if !use[f] {
+				if err := os.WriteFile(f, []byte(v), 0o644); err != nil {
+					j.Logf("  （忽略）恢复 %s: %v", f, err)
+				}
+				delete(ch.RedirectsBefore, f)
+			}
+		}
+		ch.Reply = true
+	} else if ch.Reply {
+		undoReply(ch, j) // an earlier installation had it: take its rule, table and sysctl back
+	}
 	owned, err := ownRoutes(ch.Routes, st.ClientRoutes, func(r ClientRoute) string {
 		out, _ := quietCmd("ip", "-4", "route", "show", "exact", r.Net)
 		return out
@@ -587,6 +654,9 @@ func teardownNetwork(p Paths, log Logger) {
 	ignore("nft", "delete", "table", "ip", "atom_nat")
 	ignore("ip", "rule", "del", "fwmark", fwmark, "lookup", routeTable, "priority", routePriority)
 	ignore("ip", "route", "flush", "table", routeTable)
+	if ch.Reply {
+		undoReply(ch, log)
+	}
 	for _, r := range ch.Routes {
 		ignore("ip", "route", "del", r.Net, "via", r.Via, "dev", r.Dev)
 	}
@@ -599,6 +669,21 @@ func teardownNetwork(p Paths, log Logger) {
 	if err := saveChanges(p, ch); err != nil {
 		log.Logf("记录保存失败：%v", err)
 	}
+}
+
+// undoReply removes the rule and table of the reply option and puts accept_redirects back.
+func undoReply(ch *Changes, log Logger) {
+	for _, args := range [][]string{{"rule", "del", "fwmark", replyMark, "lookup", replyTable, "priority", replyPriority}, {"route", "del", "default", "table", replyTable}} {
+		if err := runCmd(log, 30*time.Second, "ip", args...); err != nil {
+			log.Logf("  （忽略）%v", err)
+		}
+	}
+	for f, v := range ch.RedirectsBefore {
+		if err := os.WriteFile(f, []byte(v), 0o644); err != nil {
+			log.Logf("  （忽略）恢复 %s: %v", f, err)
+		}
+	}
+	ch.Reply, ch.RedirectsBefore = false, nil
 }
 
 // ownRoutes decides which client routes the installer owns: those it added before and still wants, and new

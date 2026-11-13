@@ -14,6 +14,8 @@ type Config struct {
 	AcceptGateway bool     `json:"accept_gateway"`
 	LANGateway    string   `json:"lan_gateway"` // gateway only: the router on the LAN side, for clients not on the LAN
 	ClientNets    string   `json:"client_nets"` // gateway only: those clients' networks, one per line
+	ReplyVia      bool     `json:"reply_via"`   // bypass only: answers to the LAN go back through the main router
+	Router        string   `json:"router"`      // bypass only, with ReplyVia: the main router
 	PanelPort     int      `json:"panel_port"`
 	Domestic      string   `json:"domestic"` // upstream lines
 	Foreign       string   `json:"foreign"`
@@ -69,6 +71,10 @@ func (c *Config) Validate(ifaces []Iface, installerPort int, busy func(port int)
 	case "bypass":
 		if len(c.LAN) != 1 {
 			add("lan", "旁路由选一块网卡")
+		} else if c.ReplyVia {
+			if msg := checkRouter(c.Router, c.LAN[0], ifaces); msg != "" {
+				add("router", "%s", msg)
+			}
 		}
 	case "gateway":
 		if len(c.LAN) == 0 {
@@ -138,6 +144,33 @@ func (c *Config) Validate(ifaces []Iface, installerPort int, busy func(port int)
 		add("fakeip_range", "%v", err)
 	}
 	return errs
+}
+
+// checkRouter checks the main router a single-NIC bypass sends its answers through: an IPv4 address in a
+// network of the LAN interface, not one of its own.
+func checkRouter(router, lan string, ifaces []Iface) string {
+	ip := net.ParseIP(strings.TrimSpace(router))
+	if ip == nil || ip.To4() == nil {
+		return "需要 IPv4 地址"
+	}
+	for _, i := range ifaces {
+		if i.Name != lan {
+			continue
+		}
+		for _, a := range i.Addrs {
+			own, n, err := net.ParseCIDR(a)
+			if err != nil {
+				continue
+			}
+			if own.Equal(ip) {
+				return "这是本机的地址"
+			}
+			if n.Contains(ip) {
+				return ""
+			}
+		}
+	}
+	return fmt.Sprintf("%s 不在网卡 %s 的网段内", strings.TrimSpace(router), lan)
 }
 
 // checkFakeIPRange mirrors atom's rule: an IPv4 network with prefix 8 to 24, host bits zero, not loopback.

@@ -101,6 +101,32 @@ ip route replace local 0.0.0.0/0 dev lo table 233
 
 单网卡旁路由**不需要** `ip_forward`：redirect 和 TProxy 都把包交给本机的 socket，不经过转发。联调时单网卡形态是在 `ip_forward=0` 下测通的。
 
+### 3.4 单网卡可选：回包经主路由（2026-11-14）
+
+单网卡旁路由和客户端在同一网段时，去程是"客户端 → 主路由 → atom"，回包由 atom 直接发给客户端，主路由只看到一半的连接（第 5 节的风险）。向导的单网卡页可以勾"回包经主路由"，填主路由地址（默认是 LAN 网卡默认路由的网关）。勾上以后：
+
+- `atom.nft` 的两条导入规则先给连接打 `ct mark set 0x234`，再加一条 `output` 上的 route 链：属于这些连接的回包（`ct direction reply ct mark 0x234`）打 `meta mark 0x234`，触发重新选路。按源地址认不出 TCP 的回包（redirect 的回包在选路时源地址还是本机，postrouting 才改回 FakeIP），所以用连接标记。sing-box 自己的出站、atomdns 回给客户端的 DNS 没有连接标记，不受影响。
+
+  ```nft
+  meta nfproto ipv4 meta l4proto tcp ct mark set 0x234 redirect to :7892
+  meta nfproto ipv4 meta l4proto udp ct mark set 0x234 tproxy ip to :7893 meta mark set 0x233 accept
+
+  chain output_reply {
+  	type route hook output priority mangle; policy accept;
+  	ct direction reply ct mark 0x234 meta mark set 0x234
+  }
+  ```
+
+- 策略路由（`policy-route.sh`）：`ip rule add fwmark 0x234 lookup 234 priority 9234`，表 234 只有 `default via <主路由> dev <LAN>`，没有直连路由，所以发往同网段客户端的回包也交给主路由。
+- `atom-dns.service` 每次启动前关掉 ICMP 重定向：`sysctl -w net/ipv4/conf/all/accept_redirects=0 net/ipv4/conf/<LAN>/accept_redirects=0`。主路由把包从同一个口转回去时会发重定向；单网卡没开 `ip_forward`，默认会接受，接受了就又变回直接发给客户端。原来的值记在 `changes.json` 的 `redirects_before`，卸载或重装时不勾了就还原。
+- 安装前检查表 234：有别的规则指向它或用了标记 0x234，或表里有不是安装器加的路由，就拒绝安装（这时不动已有的安装）。`changes.json` 的 `reply` 记录规则和表是安装器加的；卸载、失败撤销、重装时不勾了，都会删掉这条规则和表里的默认路由。
+- 代价：代理流量的下载方向也经过主路由，同一个口进、同一个口出，压在主路由上。默认不勾；能改主路由防火墙或下发 DHCP option 121 的，优先用第 5 节的办法。
+- 已知限制（2026-11-14，用户定保持现状）：
+  - 主路由把包从同一个口转给 atom 时，通常会给客户端发 ICMP 重定向；客户端接受以后会直接把包发给 atom，回包却仍交给主路由，主路由又只看到一个方向。考虑过只对源 MAC 是主路由的连接打标记，没做。
+  - UDP 的 conntrack 条目过期（默认 30–120 秒）而 sing-box 的会话还在（5 分钟）时，之后的包认不出是回包；这一点不开这个选项也一样（`ct direction reply return`）。
+  - 清理时出错（删规则、还原 sysctl）只记日志，记录照样清掉，和表 233 的处理一致。
+- 没有实测：真实主路由下的效果、主路由会不会转发同口回来的包。
+
 ## 4. 服务的顺序 **[定]**
 
 2026-11-12 之前，规则文件里的集合是空的，由 atomdns 在启动和每次应用 sing-box 后用 `nft -f` 填（`singbox.nft_table`、`status.nft.sync`）。改成全部导入后没有集合了，atomdns 不再碰 nft，`atom_rules.yaml` 的 `nft_table`、`nft` 和 `GET status` 的 `nft` 都删了。
@@ -113,6 +139,8 @@ ExecStartPre=/usr/sbin/nft -f /opt/atom/etc/atom.nft
 ExecStartPre=/usr/sbin/nft -f /opt/atom/etc/atom-gateway.nft
 ExecStartPre=/usr/sbin/sysctl -w net.ipv4.ip_forward=1
 ExecStartPre=/opt/atom/lib/policy-route.sh
+# 单网卡勾了"回包经主路由"（3.4）再加：
+ExecStartPre=/usr/sbin/sysctl -w net/ipv4/conf/all/accept_redirects=0 net/ipv4/conf/<LAN>/accept_redirects=0
 ```
 
 手动重新加载规则文件后不用再做别的。
@@ -128,7 +156,7 @@ ExecStartPre=/opt/atom/lib/policy-route.sh
 - 客户端的 DNS 指向 VM（DHCP 下发）。
 - 主路由加静态路由：**FakeIP 网段和要代理的网段**（IP 规则用到的网段）都指向 VM。只加 FakeIP 网段的话，IP 规则只对 7890 的流量有效。转到 VM 的 TCP、UDP 全部进 sing-box，没命中 IP、端口、网络规则的真实 IP 走 Final，所以不要把不想代理的网段转过来。IP 规则改了，主路由的静态路由也要跟着改。**[建议]**
 - `@LAN@` 是 VM 唯一的网卡。
-- **没有实测的风险**：去程经过主路由、回程由 VM 直接发给客户端，主路由只看到一半的连接。主路由的转发链如果有"丢弃 invalid 状态"的规则（RouterOS 的默认防火墙就有），可能把后续的包丢掉。处理办法二选一：在主路由的转发链里，对目标是 FakeIP 网段和 IP 规则网段的包，在 drop invalid 之前放行；或者用 DHCP option 121（无类别静态路由）把这些网段的路由直接下发给客户端，客户端就直接发给 VM，不经过主路由。联调是用 netns 模拟的（第 7 节），客户端上直接加了到 VM 的路由，相当于第二种办法，没有经过真实的主路由。
+- **没有实测的风险**：去程经过主路由、回程由 VM 直接发给客户端，主路由只看到一半的连接。主路由的转发链如果有"丢弃 invalid 状态"的规则（RouterOS 的默认防火墙就有），可能把后续的包丢掉。处理办法三选一：在主路由的转发链里，对目标是 FakeIP 网段和 IP 规则网段的包，在 drop invalid 之前放行；或者用 DHCP option 121（无类别静态路由）把这些网段的路由直接下发给客户端，客户端就直接发给 VM，不经过主路由；或者在安装器里勾"回包经主路由"（3.4）。联调是用 netns 模拟的（第 7 节），客户端上直接加了到 VM 的路由，相当于第二种办法，没有经过真实的主路由。
 
 ## 6. 双网卡网关
 
@@ -179,4 +207,7 @@ nft delete table inet atom
 nft delete table ip atom_nat 2>/dev/null
 ip rule del fwmark 0x233 lookup 233 priority 9233
 ip route flush table 233
+# 勾过"回包经主路由"（3.4）：
+ip rule del fwmark 0x234 lookup 234 priority 9234
+ip route del default table 234
 ```

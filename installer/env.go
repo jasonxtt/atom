@@ -267,6 +267,30 @@ func privateAddrs() []string {
 	return out
 }
 
+// parseDefaultVia returns the gateway of each default route in `ip -4 route show`, by interface.
+func parseDefaultVia(text string) map[string]string {
+	out := map[string]string{}
+	for _, line := range strings.Split(text, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 5 || f[0] != "default" {
+			continue
+		}
+		var via, dev string
+		for i := 1; i+1 < len(f); i++ {
+			switch f[i] {
+			case "via":
+				via = f[i+1]
+			case "dev":
+				dev = f[i+1]
+			}
+		}
+		if ip := net.ParseIP(via); ip != nil && ip.To4() != nil && dev != "" && out[dev] == "" {
+			out[dev] = via
+		}
+	}
+	return out
+}
+
 // parseViaRoutes picks the routes to a network through a gateway out of `ip -4 route show` (not the default
 // route, not on-link ones).
 func parseViaRoutes(text string) []ClientRoute {

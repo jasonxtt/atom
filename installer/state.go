@@ -20,9 +20,12 @@ type InstallState struct {
 	WAN         string    `json:"wan,omitempty"`
 	// ClientRoutes (gateway only) are written into policy-route.sh, so they come back with every start.
 	ClientRoutes []ClientRoute `json:"client_routes,omitempty"`
-	PanelPort    int           `json:"panel_port"`
-	NftBin       string        `json:"nft_bin"`
-	SysctlBin    string        `json:"sysctl_bin"`
+	// ReplyVia (bypass only) is the main router the answers to the LAN go back through; empty: they go
+	// straight to the client.
+	ReplyVia  string `json:"reply_via,omitempty"`
+	PanelPort int    `json:"panel_port"`
+	NftBin    string `json:"nft_bin"`
+	SysctlBin string `json:"sysctl_bin"`
 }
 
 // Changes is etc/changes.json: what the installer changed on the system outside /opt/atom (and the unit
@@ -37,8 +40,12 @@ type Changes struct {
 	DisabledUnits   []UnitState `json:"disabled_units,omitempty"`
 	IPForwardBefore string      `json:"ip_forward_before,omitempty"`
 	// Routes are the client routes the installer added; one that was there before is not listed and stays.
-	Routes       []ClientRoute `json:"routes,omitempty"`
-	AptInstalled []string      `json:"apt_installed,omitempty"`
+	Routes []ClientRoute `json:"routes,omitempty"`
+	// Reply is true once the installer adds the rule and table for ReplyVia; RedirectsBefore are the
+	// accept_redirects values (by /proc path) it turned off for it.
+	Reply           bool              `json:"reply,omitempty"`
+	RedirectsBefore map[string]string `json:"redirects_before,omitempty"`
+	AptInstalled    []string          `json:"apt_installed,omitempty"`
 }
 
 // UnitState is a service the installer stopped to free a port, as it was before.

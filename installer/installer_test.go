@@ -16,7 +16,7 @@ import (
 )
 
 func TestRenderNft(t *testing.T) {
-	got, err := renderNft([]string{"ens34", "ens35"})
+	got, err := renderNft([]string{"ens34", "ens35"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,10 +37,10 @@ func TestRenderNft(t *testing.T) {
 			t.Errorf("nft rules still pick destinations: %q", unwanted)
 		}
 	}
-	if _, err := renderNft([]string{`eth0" }; flush ruleset; #`}); err == nil {
+	if _, err := renderNft([]string{`eth0" }; flush ruleset; #`}, false); err == nil {
 		t.Error("an interface name that is not a plain name must be refused")
 	}
-	if _, err := renderNft(nil); err == nil {
+	if _, err := renderNft(nil, false); err == nil {
 		t.Error("no interface must be refused")
 	}
 }
@@ -63,7 +63,7 @@ func TestRenderGatewayNft(t *testing.T) {
 
 func TestRenderUnits(t *testing.T) {
 	p := Paths{Root: "/opt/atom", UnitDir: "/etc/systemd/system"}
-	bypass := renderDNSUnit(p, "/usr/sbin/nft", "/usr/sbin/sysctl", false)
+	bypass := renderDNSUnit(p, "/usr/sbin/nft", "/usr/sbin/sysctl", false, "")
 	if strings.Contains(bypass, "atom-gateway.nft") || strings.Contains(bypass, "ip_forward") {
 		t.Errorf("the single-NIC unit must not touch NAT or ip_forward:\n%s", bypass)
 	}
@@ -72,7 +72,7 @@ func TestRenderUnits(t *testing.T) {
 			t.Errorf("DNS unit lacks %q", want)
 		}
 	}
-	gw := renderDNSUnit(p, "/usr/sbin/nft", "/usr/sbin/sysctl", true)
+	gw := renderDNSUnit(p, "/usr/sbin/nft", "/usr/sbin/sysctl", true, "")
 	for _, want := range []string{"nft -f /opt/atom/etc/atom-gateway.nft", "sysctl -w net.ipv4.ip_forward=1"} {
 		if !strings.Contains(gw, want) {
 			t.Errorf("gateway unit lacks %q", want)
@@ -850,12 +850,12 @@ func TestParseViaRoutes(t *testing.T) {
 }
 
 func TestPolicyRouteWithClientRoutes(t *testing.T) {
-	s, err := renderPolicyRoute([]ClientRoute{{"10.0.0.0/24", "10.0.2.2", "ens33"}})
+	s, err := renderPolicyRoute([]ClientRoute{{"10.0.0.0/24", "10.0.2.2", "ens33"}}, nil)
 	if err != nil || !strings.Contains(s, "ip route replace 10.0.0.0/24 via 10.0.2.2 dev ens33\n") || !strings.Contains(s, "lookup "+routeTable) {
 		t.Errorf("%v\n%s", err, s)
 	}
 	for _, bad := range []ClientRoute{{"10.0.0.0/24; reboot", "10.0.2.2", "ens33"}, {"10.0.0.1/24", "10.0.2.2", "ens33"}, {"10.0.0.0/24", "x", "ens33"}, {"10.0.0.0/24", "10.0.2.2", "ens33 && x"}} {
-		if _, err := renderPolicyRoute([]ClientRoute{bad}); err == nil {
+		if _, err := renderPolicyRoute([]ClientRoute{bad}, nil); err == nil {
 			t.Errorf("%v must be refused", bad)
 		}
 	}
@@ -894,5 +894,74 @@ func TestGatewayWarning(t *testing.T) {
 	}
 	if strings.Contains(page, "全部流量都会经过这台机器") {
 		t.Error("the old gateway warning is still there")
+	}
+}
+
+func TestReplyViaRouter(t *testing.T) {
+	off, _ := renderNft([]string{"eth0"}, false)
+	if strings.Contains(off, "ct mark") || strings.Contains(off, "output_reply") {
+		t.Errorf("without the option nothing is marked:\n%s", off)
+	}
+	on, err := renderNft([]string{"eth0"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"meta l4proto tcp ct mark set 0x234 redirect to :7892\n",
+		"meta l4proto udp ct mark set 0x234 tproxy ip to :7893 meta mark set 0x233 accept\n",
+		"type route hook output priority mangle; policy accept;\n\t\tct direction reply ct mark 0x234 meta mark set 0x234\n",
+	} {
+		if !strings.Contains(on, want) {
+			t.Errorf("nft rules lack %q:\n%s", want, on)
+		}
+	}
+	pr, err := renderPolicyRoute(nil, &ClientRoute{"0.0.0.0/0", "192.168.1.1", "eth0"})
+	if err != nil || !strings.Contains(pr, "ip rule add fwmark 0x234 lookup 234 priority 9234\n") || !strings.Contains(pr, "ip route replace default via 192.168.1.1 dev eth0 table 234\n") {
+		t.Errorf("%v\n%s", err, pr)
+	}
+	if _, err := renderPolicyRoute(nil, &ClientRoute{"0.0.0.0/0", "192.168.1.1; reboot", "eth0"}); err == nil {
+		t.Error("a bad router must be refused")
+	}
+	p := Paths{Root: "/opt/atom", UnitDir: "/etc/systemd/system"}
+	u := renderDNSUnit(p, "/usr/sbin/nft", "/usr/sbin/sysctl", false, "eth0.10")
+	if !strings.Contains(u, "ExecStartPre=/usr/sbin/sysctl -w net/ipv4/conf/all/accept_redirects=0 net/ipv4/conf/eth0.10/accept_redirects=0\n") {
+		t.Errorf("redirects must be off:\n%s", u)
+	}
+
+	ifs := []Iface{{Name: "eth0", Addrs: []string{"192.168.1.2/24"}}}
+	for router, ok := range map[string]bool{"192.168.1.1": true, "192.168.1.2": false, "10.0.0.1": false, "": false, "x": false, "fe80::1": false} {
+		if got := checkRouter(router, "eth0", ifs) == ""; got != ok {
+			t.Errorf("router %q: ok=%v", router, got)
+		}
+	}
+	c := Config{Topology: "bypass", LAN: []string{"eth0"}, PanelPort: 80, Domestic: defaultDomestic, Foreign: defaultForeign, FakeIPRange: defaultFakeIP, MixedPort: 7890, ReplyVia: true}
+	hasRouter := false
+	for _, e := range c.Validate(ifs, 9996, func(int) string { return "" }) {
+		hasRouter = hasRouter || e.Field == "router"
+	}
+	if !hasRouter {
+		t.Error("the option needs the router")
+	}
+	c.Router = "192.168.1.1"
+	if errs := c.Validate(ifs, 9996, func(int) string { return "" }); len(errs) != 0 {
+		t.Errorf("%v", errs)
+	}
+
+	if c := replyConflict("9234:\tfrom all fwmark 0x234 lookup 234\n", "", false); c != "" {
+		t.Errorf("our own rule is no conflict: %s", c)
+	}
+	for _, other := range []string{"100:\tfrom 10.9.0.0/16 lookup 234\n", "9234:\tfrom 10.0.0.0/8 fwmark 0x234 lookup 234\n", "200:\tfrom all fwmark 0x234 lookup main\n"} {
+		if c := replyConflict(other, "", false); c == "" {
+			t.Errorf("%q is a conflict", other)
+		}
+	}
+	if replyConflict("", "10.0.0.0/24 via 10.0.0.1 dev eth1\n", true) == "" {
+		t.Error("a route the installer did not add is a conflict")
+	}
+	if replyConflict("", "default via 10.0.0.1 dev eth1\n", false) == "" || replyConflict("", "default via 10.0.0.1 dev eth1\n", true) != "" {
+		t.Error("routes in table 234 are a conflict unless the installer added them")
+	}
+	if got := parseDefaultVia("default via 192.168.1.1 dev eth0 proto dhcp \n10.0.0.0/24 via 10.0.2.2 dev ens33\n"); got["eth0"] != "192.168.1.1" || len(got) != 1 {
+		t.Errorf("%v", got)
 	}
 }

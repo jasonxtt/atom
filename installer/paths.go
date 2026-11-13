@@ -42,4 +42,8 @@ const (
 	fwmark          = "0x233"
 	routeTable      = "233"
 	routePriority   = "9233"
+	// the single-NIC option that sends the answers to the LAN through the main router (deploy-nft.md 3.4)
+	replyMark     = "0x234"
+	replyTable    = "234"
+	replyPriority = "9234"
 )

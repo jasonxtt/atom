@@ -277,7 +277,7 @@ const ART = {
   </svg>`,
 };
 
-const FIELD_STEP = { topology: 'net', lan: 'net', wan: 'net', accept_gateway: 'net', lan_gateway: 'net', client_nets: 'net', panel_port: 'net', domestic: 'dns', foreign: 'dns', fakeip_range: 'sb', mixed_port: 'sb' };
+const FIELD_STEP = { topology: 'net', lan: 'net', wan: 'net', accept_gateway: 'net', lan_gateway: 'net', client_nets: 'net', router: 'net', panel_port: 'net', domestic: 'dns', foreign: 'dns', fakeip_range: 'sb', mixed_port: 'sb' };
 // the DNS and sing-box steps are skipped when the data of an earlier installation is there: its settings stay
 function steps() {
   const all = [{ id: 'env', name: '环境检查', view: viewEnv }, { id: 'net', name: '网络', view: viewNet }, { id: 'dns', name: 'DNS 上游', view: viewDNS },
@@ -292,6 +292,7 @@ function initCfg(st) {
   S.cfg = {
     topology: ifs.length >= 2 ? '' : 'bypass',
     lan: def ? [def.name] : [], wan: '', accept_gateway: false, lan_gateway: '', client_nets: '',
+    reply_via: false, router: '',
     panel_port: st.defaults.panel_port,
     domestic: st.defaults.domestic, foreign: st.defaults.foreign,
     fakeip_range: st.defaults.fakeip_range, mixed_port: st.defaults.mixed_port, nodes: '',
@@ -359,6 +360,8 @@ function viewNet() {
   let h = head('网络') + '<div class="sec"><div class="lbl">部署方式</div><div class="topos">' + topo('bypass', '单网卡旁路由') + topo('gateway', '双网卡网关') + '</div>' + errOf('topology') + '</div>';
   if (c.topology === 'bypass') {
     h += '<div class="sec"><div class="lbl">网卡</div><div class="ifs">' + ifs.map(i => ifRow(i, { name: 'lan_one', bind: 'lan_one', selected: c.lan[0] === i.name })).join('') + '</div>' + errOf('lan') + '</div>';
+    h += `<div class="sec"><label class="agree"><input type="checkbox" data-bind="reply_via" ${c.reply_via ? 'checked' : ''}>回包经主路由</label></div>`;
+    if (c.reply_via) h += `<div class="sec short"><label class="lbl" for="router">主路由</label><input class="inp mono${bad('router')}" id="router" type="text" data-bind="router" value="${esc(c.router)}" spellcheck="false" placeholder="例如 192.168.1.1">${errOf('router')}</div>`;
   } else if (c.topology === 'gateway') {
     const sideHead = (cls, icon, name, tag) => `<div class="sh"><span class="ic">${icon}</span><span class="nm">${name}</span><span class="tag">${tag}</span></div>`;
     h += '<div class="g2">';
@@ -402,6 +405,8 @@ function viewConfirm() {
   if (gw) {
     const nets = c.client_nets.split('\n').map(x => x.trim()).filter(Boolean);
     h += tile('回程路由', nets.length ? `<span class="mono">${esc(nets.join(', '))}</span>` : '不需要', nets.length ? `经 LAN 侧网关 <span class="mono">${esc(c.lan_gateway)}</span>` : '客户端都在 LAN 网段', true);
+  } else {
+    h += tile('回包', c.reply_via ? `经主路由 <span class="mono">${esc(c.router)}</span>` : '直接发给客户端', '', true);
   }
   if (S.state.has_data) {
     h += tile('设置', '沿用已有数据', '', true);
@@ -626,7 +631,7 @@ document.addEventListener('input', ev => bind(ev.target));
 document.addEventListener('change', ev => {
   bind(ev.target);
   const f = ev.target.dataset && ev.target.dataset.bind;
-  if (['topology', 'lan_one', 'lan_multi', 'wan', 'accept_gateway'].includes(f)) {
+  if (['topology', 'lan_one', 'lan_multi', 'wan', 'accept_gateway', 'reply_via'].includes(f)) {
     render();
     const again = document.querySelector(`[data-bind="${f}"][value="${CSS.escape(ev.target.value)}"]`) || document.querySelector(`[data-bind="${f}"]`);
     if (again) again.focus();
@@ -642,6 +647,7 @@ function bind(t) {
   else if (f === 'lan_multi') { c.lan = [...document.querySelectorAll('[data-bind=lan_multi]:checked')].map(x => x.value); if (c.lan.includes(c.wan)) c.wan = ''; }
   else if (f === 'wan') { c.wan = t.value; c.lan = c.lan.filter(x => x !== c.wan); }
   else if (f === 'accept_gateway') c.accept_gateway = t.checked;
+  else if (f === 'reply_via') { c.reply_via = t.checked; if (c.reply_via && !c.router) c.router = (S.state.gateways || {})[c.lan[0]] || ''; }
   else if (f === 'topology') {
     c.topology = t.value;
     const ifs = S.state.ifaces, def = ifs.find(i => i.default);

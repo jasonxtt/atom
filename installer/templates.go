@@ -21,12 +21,24 @@ func nftList(names []string) string {
 // renderNft is deploy-nft.md 3.1: every IPv4 TCP and UDP connection from the LAN that is not for this
 // machine goes to sing-box. The main router only sends this machine what is to be proxied (the FakeIP
 // range and the networks to proxy), so sing-box decides all of it: a FakeIP by its binding or Final, a
-// real address by the IP, port and network rules, else Final.
-func renderNft(lan []string) (string, error) {
+// real address by the IP, port and network rules, else Final. reply (single-NIC only, 3.4) marks these
+// connections and sends their answers through the main router, so that it sees both directions.
+func renderNft(lan []string, reply bool) (string, error) {
 	if err := checkIfaceNames(lan); err != nil {
 		return "", err
 	}
 	l := nftList(lan)
+	ct, out := "", ""
+	if reply {
+		ct = "ct mark set " + replyMark + " "
+		out = fmt.Sprintf(`
+
+	# Answers to the connections above go back through the main router (policy routing, table %[2]s).
+	chain output_reply {
+		type route hook output priority mangle; policy accept;
+		ct direction reply ct mark %[1]s meta mark set %[1]s
+	}`, replyMark, replyTable)
+	}
 	return fmt.Sprintf(`#!/usr/sbin/nft -f
 # atom: send TCP and UDP from the LAN to sing-box. Written by atom-installer.
 table inet atom
@@ -37,7 +49,7 @@ table inet atom {
 		type nat hook prerouting priority dstnat; policy accept;
 		iifname != { %[1]s } return
 		fib daddr type { local, broadcast, multicast } return
-		meta nfproto ipv4 meta l4proto tcp redirect to :7892
+		meta nfproto ipv4 meta l4proto tcp %[3]sredirect to :7892
 	}
 
 	# UDP: TProxy to sing-box tproxy-in (7893); the mark sends it to table 233 (local). The
@@ -47,10 +59,10 @@ table inet atom {
 		iifname != { %[1]s } return
 		fib daddr type { local, broadcast, multicast } return
 		ct direction reply return
-		meta nfproto ipv4 meta l4proto udp tproxy ip to :7893 meta mark set %[2]s accept
-	}
+		meta nfproto ipv4 meta l4proto udp %[3]stproxy ip to :7893 meta mark set %[2]s accept
+	}%[4]s
 }
-`, l, fwmark), nil
+`, l, fwmark, ct, out), nil
 }
 
 // renderGatewayNft is deploy-nft.md 3.2: what is neither TCP nor UDP (ping) is forwarded and NATed out of
@@ -96,8 +108,9 @@ func checkIfaceNames(names []string) error {
 }
 
 // renderPolicyRoute is deploy-nft.md 3.3; ip rule is added only when it is not there yet. The client routes
-// of a dual-NIC gateway follow: answers to clients behind the LAN-side router go back through the LAN.
-func renderPolicyRoute(routes []ClientRoute) (string, error) {
+// of a dual-NIC gateway follow: answers to clients behind the LAN-side router go back through the LAN. reply
+// (single-NIC, 3.4) is the route of the marked answers through the main router.
+func renderPolicyRoute(routes []ClientRoute, reply *ClientRoute) (string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, `#!/bin/sh
 # atom: policy routing for the TProxy mark. Written by atom-installer.
@@ -110,6 +123,13 @@ ip route replace local 0.0.0.0/0 dev lo table %[2]s
 			return "", err
 		}
 		fmt.Fprintf(&b, "ip route replace %s via %s dev %s\n", r.Net, r.Via, r.Dev)
+	}
+	if reply != nil {
+		if err := reply.check(); err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "ip rule show | grep -q 'from all fwmark %[1]s lookup %[2]s' || ip rule add fwmark %[1]s lookup %[2]s priority %[3]s\n", replyMark, replyTable, replyPriority)
+		fmt.Fprintf(&b, "ip route replace default via %s dev %s table %s\n", reply.Via, reply.Dev, replyTable)
 	}
 	return b.String(), nil
 }
@@ -126,13 +146,17 @@ func (r ClientRoute) check() error {
 	return checkIfaceNames([]string{r.Dev})
 }
 
-// renderDNSUnit is deploy-nft.md 4: load the rules and the routing before atomdns starts.
-func renderDNSUnit(p Paths, nftBin, sysctlBin string, gateway bool) string {
+// renderDNSUnit is deploy-nft.md 4: load the rules and the routing before atomdns starts. replyDev (3.4) is
+// the LAN interface that must not take ICMP redirects from the main router.
+func renderDNSUnit(p Paths, nftBin, sysctlBin string, gateway bool, replyDev string) string {
 	var pre strings.Builder
 	fmt.Fprintf(&pre, "ExecStartPre=%s -f %s\n", nftBin, p.Etc("atom.nft"))
 	if gateway {
 		fmt.Fprintf(&pre, "ExecStartPre=%s -f %s\n", nftBin, p.Etc("atom-gateway.nft"))
 		fmt.Fprintf(&pre, "ExecStartPre=%s -w net.ipv4.ip_forward=1\n", sysctlBin)
+	}
+	if replyDev != "" {
+		fmt.Fprintf(&pre, "ExecStartPre=%s -w net/ipv4/conf/all/accept_redirects=0 net/ipv4/conf/%s/accept_redirects=0\n", sysctlBin, replyDev)
 	}
 	fmt.Fprintf(&pre, "ExecStartPre=%s\n", p.Lib("policy-route.sh"))
 	return fmt.Sprintf(`[Unit]
