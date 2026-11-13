@@ -18,7 +18,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALLER="$(cd "$HERE/.." && pwd)"
 ATOM_ROOT="$(cd "$INSTALLER/.." && pwd)"
-VERSION="" ATOMDNS_DIR="" WEBUI="" ATOMDNS_VERSION="unknown" SINGBOX_VERSION="1.14.4-atom"
+VERSION="" ATOMDNS_DIR="" WEBUI="" ATOMDNS_VERSION="unknown" SINGBOX_VERSION=""
 CONFIG="$ATOM_ROOT/atomdns/config" SINGBOX_DIR="$ATOM_ROOT/sing-box" REPO="jasonxtt/atom" OUT="$INSTALLER/dist"
 
 while [ $# -gt 0 ]; do
@@ -40,6 +40,8 @@ done
 [ -n "$WEBUI" ] || WEBUI="$ATOMDNS_DIR/atom-webui.tar.gz"
 [ -f "$WEBUI" ] || { echo "missing WebUI package: '$WEBUI'" >&2; exit 2; }
 [ -f "$SINGBOX_DIR/release/LDFLAGS" ] || { echo "no sing-box source at $SINGBOX_DIR (git submodule update --init)" >&2; exit 2; }
+[ -n "$SINGBOX_VERSION" ] || SINGBOX_VERSION="$(git -C "$SINGBOX_DIR" describe --tags 2>/dev/null | sed 's/^v//' || true)"
+[ -n "$SINGBOX_VERSION" ] || SINGBOX_VERSION=unknown
 [ -f "$CONFIG/config_custom.yaml" ] || { echo "no configuration at $CONFIG" >&2; exit 2; }
 
 # package name -> GOARCH, atomdns variant
@@ -55,6 +57,27 @@ commit() { git -C "$1" rev-parse --short HEAD 2>/dev/null || echo unknown; }
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$OUT"
+
+# Check every atomdns before anything is built: right architecture (ELF e_machine: x86_64 0x3e, aarch64 0xb7),
+# glibc packages need nothing newer than Debian 12's glibc 2.36, musl packages must not reference glibc at all.
+for p in $PACKAGES; do
+  IFS=: read -r pkgname arch variant <<<"$p"
+  mkdir -p "$STAGE/x-$variant"
+  tar -xzf "$ATOMDNS_DIR/atomdns-linux-$variant.tar.gz" -C "$STAGE/x-$variant"
+  bin="$STAGE/x-$variant/atomdns"
+  [ -f "$bin" ] || { echo "atomdns-linux-$variant.tar.gz has no atomdns in it" >&2; exit 2; }
+  want=3e; [ "$arch" = arm64 ] && want=b7
+  got="$(od -An -tx1 -j18 -N2 "$bin" | tr -d ' \n')"
+  [ "$got" = "${want}00" ] || { echo "atomdns-linux-$variant.tar.gz: ELF machine $got, expected ${want}00 for $arch" >&2; exit 2; }
+  syms="$(strings -a "$bin" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -uV || true)"
+  case "$pkgname" in
+    *-musl) [ -z "$syms" ] || { echo "atomdns-linux-$variant.tar.gz is for musl but references glibc" >&2; exit 2; } ;;
+    *) need="$(printf '%s\n' "$syms" | tail -1)"
+       if [ -n "$need" ] && [ "$(printf '%s\n2.36\n' "$need" | sort -V | tail -1)" != "2.36" ]; then
+         echo "atomdns-linux-$variant.tar.gz needs glibc $need, newer than Debian 12's 2.36; use the release-build.yml artifact" >&2; exit 2
+       fi ;;
+  esac
+done
 
 (cd "$INSTALLER" && go vet ./... && go test ./... >/dev/null)
 for arch in amd64 arm64; do
@@ -79,16 +102,7 @@ for p in $PACKAGES; do
   libc=glibc; case "$pkgname" in *-musl) libc=musl ;; esac
   NAME="atom-$VERSION"
   PKG="$STAGE/$pkgname/$NAME"
-  mkdir -p "$PKG/bin" "$PKG/config" "$STAGE/x-$variant"
-  tar -xzf "$ATOMDNS_DIR/atomdns-linux-$variant.tar.gz" -C "$STAGE/x-$variant"
-  [ -f "$STAGE/x-$variant/atomdns" ] || { echo "atomdns-linux-$variant.tar.gz has no atomdns in it" >&2; exit 2; }
-  if [ "$libc" = glibc ]; then
-    # Must run on Debian 12 (glibc 2.36): refuse an atomdns that needs a newer glibc.
-    need="$(strings -a "$STAGE/x-$variant/atomdns" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -uV | tail -1)"
-    if [ -n "$need" ] && [ "$(printf '%s\n2.36\n' "$need" | sort -V | tail -1)" != "2.36" ]; then
-      echo "atomdns ($variant) needs glibc $need, newer than Debian 12's 2.36; use the release-build.yml artifact" >&2; exit 2
-    fi
-  fi
+  mkdir -p "$PKG/bin" "$PKG/config"
   cp "$STAGE/x-$variant/atomdns" "$PKG/bin/atomdns"
   cp "$STAGE/build/$arch/sing-box" "$STAGE/build/$arch/atom-installer" "$PKG/bin/"
   cp "$WEBUI" "$PKG/atom-webui.tar.gz"

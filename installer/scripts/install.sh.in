@@ -182,6 +182,7 @@ if [ "$INIT" = systemd ]; then
     || die "启动安装器失败"
 else
   mkdir -p "$ROOT/run"
+  rm -f "$PIDFILE"
   start-stop-daemon --start --background --make-pidfile --pidfile "$PIDFILE" --exec /bin/sh -- \
     -c "exec \"$PKG/bin/atom-installer\" serve --pkg \"$PKG\" >> \"$ROOT/run/installer.log\" 2>&1" \
     || die "启动安装器失败"
