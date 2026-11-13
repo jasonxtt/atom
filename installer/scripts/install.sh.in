@@ -2,6 +2,9 @@
 # atom: installs the installer. Paste this on the machine that is to become the gateway:
 #   curl -fsSL <address of this script> | sudo bash
 # Arguments are passed on to the upgrade (curl ... | sudo bash -s -- --force downgrades).
+# Supported: Debian 12+ / Ubuntu 22.04+ (systemd) and Alpine 3.19+ (OpenRC), x86_64 or aarch64, on a machine
+# of its own (Docker and LXC containers are refused). The package is picked by architecture and libc
+# (Debian/Ubuntu: glibc, Alpine: musl). On Alpine run it with bash: apk add bash curl && curl -fsSL <address> | bash
 # It downloads the matching atom package (GitHub first, then the accelerators below when GitHub is
 # slow or not reachable), unpacks it under /opt/atom and starts the installation wizard, whose address
 # it prints. On a machine where atom is already installed it upgrades instead.
@@ -10,59 +13,119 @@
 #   ATOM_MIRRORS  prefixes put before the GitHub address, tried in turn after the direct download
 #   ATOM_REPO     owner/name of the GitHub repository that holds the release
 #   ATOM_PKG      a local package file or a URL to use instead of downloading the release
-#   ATOM_SHA256   the sha256 the package must have (default: the one of this script's version);
+#   ATOM_SHA256   the sha256 the package must have (default: the one of this script's version for the
+#                 package picked for this machine);
 #                 "skip" turns the check off, for a package of your own
 set -euo pipefail
 
 ATOM_VERSION="@VERSION@"
-ATOM_SHA256="${ATOM_SHA256:-@SHA256@}"
 ATOM_REPO="${ATOM_REPO:-@REPO@}"
 ATOM_MIRRORS="${ATOM_MIRRORS-https://gh-proxy.com/ https://ghfast.top/ https://down.mxw.xx.kg/ https://gh.noki.icu/}"
 
 ROOT=/opt/atom
-ASSET="atom-${ATOM_VERSION}-linux-amd64.tar.gz"
-RELEASE_URL="https://github.com/${ATOM_REPO}/releases/download/v${ATOM_VERSION}/${ASSET}"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'atom: %s\n' "$*" >&2; exit 1; }
 
+# pick_package ARCH ID: prints "<package suffix> <sha256>", or fails when the combination is not supported.
+pick_package() {
+  local arch libc
+  case "$1" in
+    x86_64) arch=amd64 ;;
+    aarch64) arch=arm64 ;;
+    *) return 1 ;;
+  esac
+  case "$2" in
+    debian|ubuntu) libc="" ;;
+    alpine) libc="-musl" ;;
+    *) return 1 ;;
+  esac
+  case "$arch$libc" in
+    amd64) echo "amd64 @SHA256_AMD64@" ;;
+    arm64) echo "arm64 @SHA256_ARM64@" ;;
+    amd64-musl) echo "amd64-musl @SHA256_AMD64_MUSL@" ;;
+    arm64-musl) echo "arm64-musl @SHA256_ARM64_MUSL@" ;;
+  esac
+}
+
 [ "$(id -u)" = 0 ] || die "需要 root。用法：curl -fsSL <脚本地址> | sudo bash"
-[ "$(uname -m)" = x86_64 ] || die "只支持 x86_64"
-[ -d /run/systemd/system ] || die "需要 systemd"
 [ -r /etc/os-release ] || die "找不到 /etc/os-release"
 # shellcheck disable=SC1091
 . /etc/os-release
+ARCH="$(uname -m)"
+case "$ARCH" in x86_64|aarch64) ;; *) die "只支持 x86_64 和 aarch64（当前：$ARCH）" ;; esac
 major="${VERSION_ID%%.*}"
+minor="${VERSION_ID#*.}"; minor="${minor%%.*}"
 case "${ID:-}" in
   debian) [ "${major:-0}" -ge 12 ] || die "需要 Debian 12 或更新" ;;
   ubuntu) [ "${major:-0}" -ge 22 ] || die "需要 Ubuntu 22.04 或更新" ;;
-  *) die "只支持 Debian 和 Ubuntu（当前：${PRETTY_NAME:-未知}）" ;;
+  alpine)
+    case "$minor" in ''|*[!0-9]*) minor=0 ;; esac
+    { [ "${major:-0}" -gt 3 ] || { [ "${major:-0}" = 3 ] && [ "$minor" -ge 19 ]; }; } || die "需要 Alpine 3.19 或更新"
+    ;;
+  *) die "只支持 Debian、Ubuntu 和 Alpine（当前：${PRETTY_NAME:-未知}）" ;;
 esac
-for c in curl tar sha256sum; do command -v "$c" >/dev/null || die "缺少命令 $c"; done
+# Docker / LXC: no nft tproxy, sysctl and service manager of its own to rely on.
+if [ -f /.dockerenv ] || [ -f /run/.containerenv ] || tr '\0' '\n' < /proc/1/environ 2>/dev/null | grep -q '^container='; then
+  die "不支持在 Docker / LXC 容器里运行，请用虚拟机或物理机"
+fi
+if [ -d /run/systemd/system ]; then
+  INIT=systemd
+elif command -v rc-service >/dev/null && [ -d /run/openrc ]; then
+  INIT=openrc
+else
+  die "需要 systemd 或 OpenRC"
+fi
+for c in curl tar sha256sum; do
+  command -v "$c" >/dev/null || die "缺少命令 $c$([ "${ID:-}" = alpine ] && echo "（apk add $c）")"
+done
 if ! command -v ss >/dev/null; then
   say "安装 iproute2…"
-  apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 >/dev/null || die "安装 iproute2 失败"
+  if [ "$ID" = alpine ]; then
+    apk add --quiet iproute2 || die "安装 iproute2 失败"
+  else
+    apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 >/dev/null || die "安装 iproute2 失败"
+  fi
 fi
 
+PICK="$(pick_package "$ARCH" "$ID")" || die "没有适合这台机器的包（$ARCH，$ID）"
+read -r PKG_SUFFIX PKG_SHA256 <<<"$PICK"
+ATOM_SHA256="${ATOM_SHA256:-$PKG_SHA256}"
+ASSET="atom-${ATOM_VERSION}-linux-${PKG_SUFFIX}.tar.gz"
+RELEASE_URL="https://github.com/${ATOM_REPO}/releases/download/v${ATOM_VERSION}/${ASSET}"
+
+PIDFILE="$ROOT/run/installer.pid"
+wizard_active() {
+  if [ "$INIT" = systemd ]; then
+    systemctl is-active --quiet atom-installer.service
+  else
+    local pid
+    pid="$(cat "$PIDFILE" 2>/dev/null)" || return 1
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q atom-installer
+  fi
+}
+if [ "$INIT" = systemd ]; then STOP_HINT="systemctl stop atom-installer"; else STOP_HINT="kill \$(cat $PIDFILE)"; fi
+
 # An earlier wizard is asked to close and has to agree (it refuses while an installation is running, and
-# takes no new one once it agreed); the package is replaced only after it answered 200 and its unit has exited.
-# No answer, any other answer, or a unit that does not exit: nothing is touched, the wizard is left to the user.
+# takes no new one once it agreed); the package is replaced only after it answered 200 and its process has exited
+# (systemd: the unit; OpenRC: the process in the pidfile).
+# No answer, any other answer, or a process that does not exit: nothing is touched, the wizard is left to the user.
 stop_wizard() {
   local wport code
-  systemctl is-active --quiet atom-installer.service || return 0
+  wizard_active || return 0
   wport="$(sed -n 's/.*"port": *\([0-9]*\).*/\1/p' "$ROOT/run/installer.json" 2>/dev/null || true)"
-  [ -n "$wport" ] || die "安装器单元在运行但找不到它的端口。确认没有安装在进行后执行：systemctl stop atom-installer"
+  [ -n "$wport" ] || die "安装器在运行但找不到它的端口。确认没有安装在进行后执行：$STOP_HINT"
   code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:${wport}/api/finish" || true)"
   case "$code" in
     200) ;;
     409) die "安装正在进行，等它完成后再运行" ;;
-    *) die "安装器没有答应关闭（回应：${code:-无}）。确认没有安装在进行后执行：systemctl stop atom-installer，再重新运行" ;;
+    *) die "安装器没有答应关闭（回应：${code:-无}）。确认没有安装在进行后执行：$STOP_HINT，再重新运行" ;;
   esac
   for _ in $(seq 1 30); do
-    systemctl is-active --quiet atom-installer.service || return 0
+    wizard_active || { rm -f "$PIDFILE"; return 0; }
     sleep 0.5
   done
-  die "安装器答应关闭但没有退出。确认没有安装在进行后执行：systemctl stop atom-installer，再重新运行"
+  die "安装器答应关闭但没有退出。确认没有安装在进行后执行：$STOP_HINT，再重新运行"
 }
 
 TMP="$(mktemp -d)"
@@ -112,15 +175,22 @@ if grep -qs '"complete": true' "$ROOT/etc/install.json"; then
   exec "$PKG/bin/atom-installer" upgrade --pkg "$PKG" "$@"
 fi
 
-systemctl reset-failed atom-installer.service 2>/dev/null || true
 rm -f "$ROOT/run/installer.json"
-systemd-run --quiet --unit=atom-installer --collect "$PKG/bin/atom-installer" serve --pkg "$PKG" \
-  || die "启动安装器失败"
+if [ "$INIT" = systemd ]; then
+  systemctl reset-failed atom-installer.service 2>/dev/null || true
+  systemd-run --quiet --unit=atom-installer --collect "$PKG/bin/atom-installer" serve --pkg "$PKG" \
+    || die "启动安装器失败"
+else
+  mkdir -p "$ROOT/run"
+  start-stop-daemon --start --background --make-pidfile --pidfile "$PIDFILE" --exec /bin/sh -- \
+    -c "exec \"$PKG/bin/atom-installer\" serve --pkg \"$PKG\" >> \"$ROOT/run/installer.log\" 2>&1" \
+    || die "启动安装器失败"
+fi
 for _ in $(seq 1 40); do
   [ -s "$ROOT/run/installer.json" ] && break
   sleep 0.5
 done
-[ -s "$ROOT/run/installer.json" ] || die "安装器没有起来，查看：journalctl -u atom-installer"
+[ -s "$ROOT/run/installer.json" ] || die "安装器没有起来，查看：$([ "$INIT" = systemd ] && echo "journalctl -u atom-installer" || echo "$ROOT/run/installer.log")"
 
 say ""
 say "atom 安装器已就绪，请在浏览器打开："
