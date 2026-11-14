@@ -149,6 +149,14 @@ type stateResp struct {
 	} `json:"installed,omitempty"`
 	Running bool `json:"running"`
 	HasData bool `json:"has_data"`
+	// Reconfigure: the wizard edits the installed configuration; Current is what is installed now and Login
+	// the panel login (nil: unknown).
+	Reconfigure bool    `json:"reconfigure,omitempty"`
+	Current     *Config `json:"current,omitempty"`
+	Login       *struct {
+		Enabled  bool   `json:"enabled"`
+		Username string `json:"username"`
+	} `json:"login,omitempty"`
 }
 
 func (s *Server) state() stateResp {
@@ -179,6 +187,20 @@ func (s *Server) state() stateResp {
 		}{st.Version, st.PanelPort}
 	}
 	r.HasData = hasData(s.ins.Paths)
+	if s.ins.Reconfigure {
+		r.Reconfigure = true
+		if st, err := loadState(s.ins.Paths); err == nil {
+			cur := configFromState(st)
+			r.Current = &cur
+			var l struct {
+				Enabled  bool   `json:"enabled"`
+				Username string `json:"username"`
+			}
+			if newAPIClient(st.PanelPort, s.ins.Paths.Data()).call("GET", "/auth", nil, &l) == nil {
+				r.Login = &l
+			}
+		}
+	}
 	s.mu.Lock()
 	r.Running = s.job != nil && !s.job.view(0).Done
 	s.mu.Unlock()
@@ -259,6 +281,22 @@ func (c *Config) fillDefaults() {
 	c.Topology = strings.TrimSpace(c.Topology)
 }
 
+// currentLoginUser is the user of the panel login of an installed machine ("" without one or off reconfigure).
+func (s *Server) currentLoginUser() string {
+	if !s.ins.Reconfigure {
+		return ""
+	}
+	st, err := loadState(s.ins.Paths)
+	if err != nil {
+		return ""
+	}
+	var l struct {
+		Username string `json:"username"`
+	}
+	_ = newAPIClient(st.PanelPort, s.ins.Paths.Data()).call("GET", "/auth", nil, &l)
+	return l.Username
+}
+
 func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 	var cfg Config
 	if json.NewDecoder(r.Body).Decode(&cfg) != nil {
@@ -267,6 +305,7 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg.fillDefaults()
 	cfg.keepData = hasData(s.ins.Paths)
+	cfg.currentUser = s.currentLoginUser()
 	errs := cfg.Validate(listInterfaces(), s.ins.InstallerPort, s.busy())
 	if errs == nil {
 		errs = []FieldError{}
@@ -288,6 +327,7 @@ func (s *Server) handleInstall(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg.fillDefaults()
 	cfg.keepData = hasData(s.ins.Paths)
+	cfg.currentUser = s.currentLoginUser()
 	if probs := checkSystem().Problems; len(probs) > 0 {
 		writeErr(w, 400, strings.Join(probs, "；"))
 		return

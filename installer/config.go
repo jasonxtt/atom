@@ -19,9 +19,10 @@ type Config struct {
 	ReplyVia      bool     `json:"reply_via"`   // bypass only: answers to the LAN go back through the main router
 	Router        string   `json:"router"`      // bypass only, with ReplyVia: the main router
 	PanelPort     int      `json:"panel_port"`
-	PanelUser     string   `json:"panel_user"`     // the panel login; both empty: no login (a kept one stays)
-	PanelPassword string   `json:"panel_password"` // sent to atomdns only, never written by the installer
-	Domestic      string   `json:"domestic"`       // upstream lines
+	PanelUser     string   `json:"panel_user"`      // the panel login; both empty: no login (a kept one stays)
+	PanelPassword string   `json:"panel_password"`  // sent to atomdns only, never written by the installer
+	PanelLoginOff bool     `json:"panel_login_off"` // reconfigure: turn the panel login off
+	Domestic      string   `json:"domestic"`        // upstream lines
 	Foreign       string   `json:"foreign"`
 	FakeIPRange   string   `json:"fakeip_range"`
 	MixedPort     int      `json:"mixed_port"`
@@ -30,6 +31,9 @@ type Config struct {
 	// keepData is set by the server, not the client: the data of an earlier installation is there, and its
 	// settings, rules and nodes win over the DNS and sing-box answers.
 	keepData bool
+	// currentUser is the panel login user of an installed machine (reconfigure): the same name without a
+	// password changes nothing.
+	currentUser string
 }
 
 const (
@@ -136,7 +140,9 @@ func (c *Config) Validate(ifaces []Iface, installerPort int, busy func(port int)
 	}
 	user := strings.TrimSpace(c.PanelUser)
 	switch {
+	case c.PanelLoginOff:
 	case user == "" && c.PanelPassword == "":
+	case c.PanelPassword == "" && c.currentUser != "" && user == c.currentUser:
 	case user == "":
 		add("panel_user", "设置了密码就要填用户名")
 	case c.PanelPassword == "":

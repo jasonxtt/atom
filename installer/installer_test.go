@@ -1280,3 +1280,129 @@ func TestUninstallRemovesOpenRCLogs(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigFromState(t *testing.T) {
+	st := &InstallState{Topology: "gateway", LAN: []string{"eth1"}, WAN: "eth0", PanelPort: 8080,
+		ClientRoutes: []ClientRoute{{"10.1.0.0/24", "192.168.1.2", "eth1"}, {"10.2.0.0/24", "192.168.1.2", "eth1"}}}
+	c := configFromState(st)
+	if c.Topology != "gateway" || c.WAN != "eth0" || c.PanelPort != 8080 || c.LANGateway != "192.168.1.2" || c.ClientNets != "10.1.0.0/24\n10.2.0.0/24" || !c.AcceptGateway {
+		t.Errorf("%+v", c)
+	}
+	c = configFromState(&InstallState{Topology: "bypass", LAN: []string{"eth0"}, ReplyVia: "10.0.0.1", PanelPort: 80})
+	if !c.ReplyVia || c.Router != "10.0.0.1" || c.LANGateway != "" || c.AcceptGateway {
+		t.Errorf("%+v", c)
+	}
+	if c := configFromState(&InstallState{Topology: "bypass"}); c.LAN == nil {
+		t.Error("LAN must not be null in JSON")
+	}
+}
+
+func TestReconfigureLoginValidation(t *testing.T) {
+	ifs := []Iface{{Name: "eth0", Addrs: []string{"10.0.0.5/24"}}}
+	base := func() Config {
+		return Config{Topology: "bypass", LAN: []string{"eth0"}, PanelPort: 8081, keepData: true, currentUser: "admin"}
+	}
+	has := func(c Config, field string) bool {
+		for _, e := range c.Validate(ifs, 9996, func(int) string { return "" }) {
+			if e.Field == field {
+				return true
+			}
+		}
+		return false
+	}
+	c := base()
+	c.PanelUser = "admin"
+	if has(c, "panel_password") {
+		t.Error("the same user without a password changes nothing")
+	}
+	c.PanelUser = "root"
+	if !has(c, "panel_password") {
+		t.Error("a new user needs a password")
+	}
+	c = base()
+	c.PanelLoginOff = true
+	c.PanelUser = "x"
+	if has(c, "panel_password") || has(c, "panel_user") {
+		t.Error("turning the login off ignores the fields")
+	}
+	c = base()
+	c.currentUser = ""
+	c.PanelUser = "admin"
+	if !has(c, "panel_password") {
+		t.Error("without a login a user needs a password")
+	}
+}
+
+func TestSetLogin(t *testing.T) {
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		w.Write([]byte("{}"))
+	}))
+	defer srv.Close()
+	api := &apiClient{base: srv.URL + "/api/v1/atom", http: srv.Client(), authFile: filepath.Join(t.TempDir(), "none")}
+	j := newJob(nil)
+	for _, c := range []struct {
+		cfg  Config
+		want string
+	}{
+		{Config{PanelLoginOff: true}, "DELETE /api/v1/atom/auth"},
+		{Config{PanelUser: "a", PanelPassword: "b"}, "PUT /api/v1/atom/auth"},
+		{Config{PanelUser: "a"}, ""},
+		{Config{}, ""},
+	} {
+		calls = nil
+		setLogin(api, c.cfg, j)
+		if got := strings.Join(calls, ","); got != c.want {
+			t.Errorf("%+v: %q, want %q", c.cfg, got, c.want)
+		}
+	}
+}
+
+func TestReconfigureUndoesWhatTheOldStateLacks(t *testing.T) {
+	route := ClientRoute{"10.1.0.0/24", "192.168.1.2", "eth1"}
+	kept := ClientRoute{"10.2.0.0/24", "192.168.1.2", "eth1"}
+	newCh := &Changes{IPForwardBefore: "0", Reply: true, Routes: []ClientRoute{route, kept}}
+	rc := &reconfigureRun{oldSt: InstallState{Topology: "bypass"}, oldCh: Changes{Routes: []ClientRoute{kept}}}
+	log := &recLogger{}
+	rc.undoAdditions(newCh, log)
+	for _, want := range []string{"nft delete table ip atom_nat", "ip rule del fwmark 0x234", "ip route del 10.1.0.0/24"} {
+		if !log.ran(want) {
+			t.Errorf("not undone: %q: %v", want, log.lines)
+		}
+	}
+	if log.ran("ip route del 10.2.0.0/24") {
+		t.Error("a route the old state had stays")
+	}
+	// the old state was a gateway with the reply option: nothing of it is taken away
+	rc = &reconfigureRun{oldSt: InstallState{Topology: "gateway", ReplyVia: "10.0.0.1"}, oldCh: Changes{IPForwardBefore: "0", Routes: []ClientRoute{route, kept}}}
+	log = &recLogger{}
+	rc.undoAdditions(&Changes{IPForwardBefore: "0", Reply: true, Routes: []ClientRoute{route, kept}}, log)
+	if len(log.lines) != 0 {
+		t.Errorf("%v", log.lines)
+	}
+}
+
+func TestBeginReconfigureBacksUp(t *testing.T) {
+	p := Paths{Root: t.TempDir(), UnitDir: t.TempDir()}
+	ins := &Installer{Paths: p}
+	if _, err := ins.beginReconfigure(&recLogger{}); err == nil {
+		t.Error("nothing installed")
+	}
+	writeJSON(p.State(), &InstallState{Version: "0.1.0", Complete: true, Topology: "bypass", PanelPort: 80})
+	os.WriteFile(p.DNSUnit(), []byte("unit"), 0o644)
+	os.MkdirAll(p.Lib(""), 0o755)
+	os.WriteFile(p.Lib("policy-route.sh"), []byte("#!/bin/sh"), 0o755)
+	rc, err := ins.beginReconfigure(&recLogger{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"etc/install.json", "lib/policy-route.sh", "units/atom-dns.service"} {
+		if _, err := os.Stat(filepath.Join(rc.dir, f)); err != nil {
+			t.Errorf("%s is not in the backup", f)
+		}
+	}
+	if rc.oldSt.PanelPort != 80 {
+		t.Errorf("%+v", rc.oldSt)
+	}
+}

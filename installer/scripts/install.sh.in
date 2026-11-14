@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # atom: installs the installer. Paste this on the machine that is to become the gateway:
 #   curl -fsSL <address of this script> | sudo bash
-# Arguments are passed on to the upgrade (curl ... | sudo bash -s -- --force downgrades).
+# On a machine where atom is installed it asks what to do: 1 upgrade (default), 2 reconfigure, 3 uninstall (the
+# choice is read from the terminal; without one it upgrades). curl ... | sudo bash -s -- upgrade|reconfigure|uninstall
+# chooses without asking; other arguments go to the upgrade (-- --force downgrades; uninstall takes --purge, --yes).
 # Supported: Debian 12+ / Ubuntu 22.04+ (systemd) and Alpine 3.19+ (OpenRC), x86_64 or aarch64, on a machine
 # of its own (Docker and LXC containers are refused). The package is picked by architecture and libc
 # (Debian/Ubuntu: glibc, Alpine: musl). On Alpine run it with bash: apk add bash curl && curl -fsSL <address> | bash
 # It downloads the matching atom package (GitHub first, then the accelerators below when GitHub is
 # slow or not reachable), unpacks it under /opt/atom and starts the installation wizard, whose address
-# it prints. On a machine where atom is already installed it upgrades instead.
+# it prints.
 #
 # Environment (all optional):
 #   ATOM_MIRRORS  prefixes put before the GitHub address, tried in turn after the direct download
@@ -128,6 +130,53 @@ stop_wizard() {
   die "安装器答应关闭但没有退出。确认没有安装在进行后执行：$STOP_HINT，再重新运行"
 }
 
+installed_version() { sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$ROOT/etc/install.json" 2>/dev/null | head -1; }
+
+# What to tell after an upgrade: the options this version added that only "reconfigure" can turn on.
+# Edit this text for each version.
+upgrade_news() {
+  say ""
+  say "本版本新增，升级不会改动你的设置，需要「重新配置」才能开启："
+  say "  · 单网卡旁路由的「回包经主路由」"
+  say "  · 在向导里设置面板登录（也可以在面板的设置页里设）"
+  say "重新配置：再运行同一条命令，选 2。"
+}
+
+ACTION=""
+INSTALLED=""
+if grep -qs '"complete": true' "$ROOT/etc/install.json"; then
+  INSTALLED=1
+  case "${1:-}" in
+    upgrade|reconfigure|uninstall) ACTION="$1"; shift ;;
+  esac
+  if [ -z "$ACTION" ]; then
+    ACTION=upgrade
+    if { : < /dev/tty; } 2>/dev/null; then
+      say "已安装 atom $(installed_version)，这个脚本是 ${ATOM_VERSION}。"
+      say "  1) 升级（默认）"
+      say "  2) 重新配置"
+      say "  3) 卸载"
+      printf '选择 [1]: '
+      choice=""
+      read -r choice < /dev/tty || true
+      case "$choice" in
+        ""|1) ACTION=upgrade ;;
+        2) ACTION=reconfigure ;;
+        3) ACTION=uninstall ;;
+        *) die "没有这个选项：$choice" ;;
+      esac
+    fi
+  fi
+  if [ "$ACTION" = uninstall ]; then
+    stop_wizard
+    [ -x "$ROOT/bin/atom-installer" ] || die "找不到 $ROOT/bin/atom-installer"
+    if { : < /dev/tty; } 2>/dev/null; then
+      exec "$ROOT/bin/atom-installer" uninstall "$@" < /dev/tty
+    fi
+    exec "$ROOT/bin/atom-installer" uninstall "$@" < /dev/null
+  fi
+fi
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 PKGFILE="$TMP/$ASSET"
@@ -170,21 +219,32 @@ mkdir -p "$PKG"
 tar -xzf "$PKGFILE" -C "$PKG" --strip-components=1 || die "解包失败"
 [ -x "$PKG/bin/atom-installer" ] || die "包里没有 atom-installer"
 
-if grep -qs '"complete": true' "$ROOT/etc/install.json"; then
+WIZARD_ARGS=""
+if [ -n "$INSTALLED" ]; then
+  before="$(installed_version)"
   say "已安装 atom，升级…"
-  exec "$PKG/bin/atom-installer" upgrade --pkg "$PKG" "$@"
+  keep=""
+  [ "$ACTION" = reconfigure ] && keep="--keep-pkg"
+  rc=0
+  "$PKG/bin/atom-installer" upgrade --pkg "$PKG" $keep "$@" || rc=$?
+  [ "$rc" = 0 ] || exit "$rc"
+  if [ "$ACTION" = upgrade ]; then
+    [ "$(installed_version)" = "$before" ] || upgrade_news
+    exit 0
+  fi
+  WIZARD_ARGS="--reconfigure"
 fi
 
 rm -f "$ROOT/run/installer.json"
 if [ "$INIT" = systemd ]; then
   systemctl reset-failed atom-installer.service 2>/dev/null || true
-  systemd-run --quiet --unit=atom-installer --collect "$PKG/bin/atom-installer" serve --pkg "$PKG" \
+  systemd-run --quiet --unit=atom-installer --collect "$PKG/bin/atom-installer" serve --pkg "$PKG" $WIZARD_ARGS \
     || die "启动安装器失败"
 else
   mkdir -p "$ROOT/run"
   rm -f "$PIDFILE"
   start-stop-daemon --start --background --make-pidfile --pidfile "$PIDFILE" --exec /bin/sh -- \
-    -c "exec \"$PKG/bin/atom-installer\" serve --pkg \"$PKG\" >> \"$ROOT/run/installer.log\" 2>&1" \
+    -c "exec \"$PKG/bin/atom-installer\" serve --pkg \"$PKG\" $WIZARD_ARGS >> \"$ROOT/run/installer.log\" 2>&1" \
     || die "启动安装器失败"
 fi
 for _ in $(seq 1 40); do

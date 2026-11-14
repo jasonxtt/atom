@@ -19,6 +19,7 @@ type Installer struct {
 	PkgDir        string // the unpacked package
 	Version       string
 	InstallerPort int
+	Reconfigure   bool // the wizard runs on an installed machine (reconfigure.go)
 }
 
 // Job is one run of the installation, observed by the wizard page.
@@ -135,6 +136,15 @@ func (ins *Installer) runInstall(cfg Config, j *Job) {
 	j.hints = hints
 	j.mu.Unlock()
 	netStarted := false // a refusal before the network step leaves an earlier installation as it is
+	var rc *reconfigureRun
+	if ins.Reconfigure {
+		var err error
+		if rc, err = ins.beginReconfigure(j); err != nil {
+			j.Logf("重新配置没有开始：%v", err)
+			j.finish(err, 0)
+			return
+		}
+	}
 	err := func() error {
 		steps := []func() error{
 			func() error { return ins.stepDeps(cfg, j) },
@@ -166,7 +176,10 @@ func (ins *Installer) runInstall(cfg Config, j *Job) {
 	}
 	if err != nil {
 		j.Logf("安装失败：%v", err)
-		if netStarted {
+		switch {
+		case rc != nil:
+			rc.restore(ins, j)
+		case netStarted:
 			ins.rollbackNetwork(j)
 		}
 		j.finish(err, 0)
@@ -272,7 +285,13 @@ func (ins *Installer) installBinaries(log Logger) error {
 	return nil
 }
 
-func (ins *Installer) stepBinaries(j *Job) error { return ins.installBinaries(j) }
+func (ins *Installer) stepBinaries(j *Job) error {
+	if ins.Reconfigure {
+		j.Logf("程序已经是 %s", ins.Version) // the upgrade that precedes a reconfigure installed them
+		return nil
+	}
+	return ins.installBinaries(j)
+}
 
 func (ins *Installer) installData(panelPort int, log Logger) error {
 	reload := ""
@@ -430,6 +449,9 @@ func (ins *Installer) stepNetwork(cfg Config, j *Job) error {
 	if cfg.Topology == "bypass" && cfg.ReplyVia {
 		st.ReplyVia = strings.TrimSpace(cfg.Router)
 	}
+	if old, err := loadState(ins.Paths); err == nil { // a reconfigure keeps what the first installation recorded
+		st.InstalledAt, st.Complete = old.InstalledAt, old.Complete
+	}
 	ch := loadChanges(ins.Paths)
 	if st.ReplyVia != "" {
 		if ch.RedirectsBefore == nil {
@@ -466,6 +488,9 @@ func (ins *Installer) stepNetwork(cfg Config, j *Job) error {
 		return err
 	}
 	ch.Routes = owned
+	if cfg.Topology != "gateway" && ch.IPForwardBefore != "" {
+		undoGateway(ch, j) // an earlier gateway installation: take its NAT table and ip_forward back
+	}
 	ch.Network = true // from here on the installer owns the network changes, until they are taken back
 	if cfg.Topology == "gateway" && ch.IPForwardBefore == "" {
 		if v, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward"); err == nil {
@@ -581,8 +606,16 @@ func (ins *Installer) stepSettings(cfg Config, j *Job) error {
 
 // setLogin sets the panel login the wizard was given (last: from then on every request needs the key).
 func setLogin(api *apiClient, cfg Config, j *Job) {
+	if cfg.PanelLoginOff {
+		if err := api.call("DELETE", "/auth", map[string]any{}, nil); err != nil {
+			j.warn("面板登录没有关闭（可以在面板的设置页里关）：%v", err)
+		} else {
+			j.Logf("已关闭面板登录")
+		}
+		return
+	}
 	user := strings.TrimSpace(cfg.PanelUser)
-	if user == "" {
+	if user == "" || cfg.PanelPassword == "" { // no password: the login stays as it is
 		return
 	}
 	if err := api.call("PUT", "/auth", map[string]any{"username": user, "password": cfg.PanelPassword}, nil); err != nil {
@@ -732,6 +765,17 @@ func teardownNetwork(p Paths, log Logger) {
 	if err := saveChanges(p, ch); err != nil {
 		log.Logf("记录保存失败：%v", err)
 	}
+}
+
+// undoGateway takes back what the dual-NIC gateway added: the NAT table and the ip_forward value.
+func undoGateway(ch *Changes, log Logger) {
+	if err := runCmd(log, 30*time.Second, "nft", "delete", "table", "ip", "atom_nat"); err != nil {
+		log.Logf("  （忽略）%v", err)
+	}
+	if err := os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte(ch.IPForwardBefore), 0o644); err != nil {
+		log.Logf("  （忽略）恢复 ip_forward: %v", err)
+	}
+	ch.IPForwardBefore = ""
 }
 
 // undoReply removes the rule and table of the reply option and puts accept_redirects back.

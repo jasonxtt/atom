@@ -23,9 +23,9 @@ type manifest struct {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage: atom-installer <command>
-  serve [--pkg DIR] [--port N]   start the installation wizard
+  serve [--pkg DIR] [--port N] [--reconfigure]   start the installation wizard (--reconfigure: on an installed machine)
   urls                           print the wizard's addresses
-  upgrade [--pkg DIR] [--force]  upgrade an installed atom from an unpacked package
+  upgrade [--pkg DIR] [--force] [--keep-pkg]  upgrade an installed atom from an unpacked package
   uninstall [--purge] [--yes]    remove atom (the data stays unless --purge)
   version`)
 }
@@ -78,10 +78,16 @@ func cmdServe(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	pkg := fs.String("pkg", "", "unpacked package (default: the directory above this program's)")
 	port := fs.Int("port", defaultPort, "port to try first; a free one is chosen when it is taken")
+	reconf := fs.Bool("reconfigure", false, "edit the configuration of an installed atom")
 	fs.Parse(args)
 	ins, err := newInstaller(*pkg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	ins.Reconfigure = *reconf
+	if st, err := loadState(ins.Paths); *reconf && (err != nil || !st.Complete) {
+		fmt.Fprintln(os.Stderr, "没有已完成的安装")
 		return 1
 	}
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
@@ -145,7 +151,13 @@ func cmdUpgrade(args []string) int {
 	fs := flag.NewFlagSet("upgrade", flag.ExitOnError)
 	pkg := fs.String("pkg", "", "unpacked package")
 	force := fs.Bool("force", false, "upgrade to the same or an older version")
+	keep := fs.Bool("keep-pkg", false, "leave the unpacked package (a reconfigure uses it next)")
 	fs.Parse(args)
+	cleanup := func() {
+		if !*keep {
+			os.RemoveAll(defaultPaths().Pkg())
+		}
+	}
 	ins, err := newInstaller(*pkg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -159,16 +171,16 @@ func cmdUpgrade(args []string) int {
 	switch c := compareVersions(ins.Version, st.Version); {
 	case c == 0 && !*force:
 		fmt.Printf("已经是 %s\n", st.Version)
-		os.RemoveAll(ins.Paths.Pkg())
+		cleanup()
 		return 0
 	case c < 0 && !*force:
 		fmt.Fprintf(os.Stderr, "包的版本 %s 比已装的 %s 旧；要降级请加 --force\n", ins.Version, st.Version)
-		os.RemoveAll(ins.Paths.Pkg())
+		cleanup()
 		return 1
 	}
 	fmt.Printf("升级 %s → %s\n", st.Version, ins.Version)
 	err = ins.upgrade(st, stdoutLogger{})
-	os.RemoveAll(ins.Paths.Pkg())
+	cleanup()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "升级失败：", err)
 		return 1
