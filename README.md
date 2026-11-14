@@ -23,13 +23,13 @@
 
 ## 安装
 
-Debian 12+ 或 Ubuntu 22.04+，x86_64，systemd，root：
+Debian 12+ 或 Ubuntu 22.04+（systemd）、Alpine 3.19+（OpenRC），x86_64 或 aarch64，root，不支持 Docker/LXC 容器：
 
 ```bash
 curl -fsSL https://github.com/jasonxtt/atom/releases/latest/download/install.sh | sudo bash
 ```
 
-脚本下载配套包（GitHub 不通时依次换加速前缀）、校验 sha256，起一个网页向导并打印地址；在浏览器里选拓扑、配 DNS 和 sing-box，装完自动跳到面板。已经装过的机器上再运行同一条命令就是升级（降级：`… | sudo bash -s -- --force`）。卸载：`/opt/atom/bin/atom-installer uninstall [--purge]`。详见 [installer/README.md](installer/README.md)。
+脚本下载配套包（GitHub 不通时依次换加速前缀）、校验 sha256，起一个网页向导并打印地址；在浏览器里选拓扑、配 DNS 和 sing-box，装完自动跳到面板。Alpine 上先 `apk add bash curl`，命令里的 `sudo bash` 换成 `bash`。已经装过的机器上再运行同一条命令就是升级（降级：`… | sudo bash -s -- --force`）。卸载：`/opt/atom/bin/atom-installer uninstall [--purge]`。详见 [installer/README.md](installer/README.md)。
 
 ## 仓库
 
@@ -46,21 +46,13 @@ curl -fsSL https://github.com/jasonxtt/atom/releases/latest/download/install.sh 
 ```bash
 git clone --recursive https://github.com/jasonxtt/atom.git && cd atom
 
-# atomdns（Linux x86_64，需要 Rust stable 和 Node.js）
-(cd atomdns && OUTPUT=release/atomdns scripts/build-rust-native.sh)
-# WebUI（需要 Node.js）
-(cd atomdns/webui && npm ci && npm run build:package)
-# sing-box（需要 Go，可以交叉编译）
-(cd sing-box && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
-  -tags "$(cat release/DEFAULT_BUILD_TAGS_OTHERS)" \
-  -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=1.14.4-atom $(cat release/LDFLAGS)" \
-  -o ../dist-sing-box ./cmd/sing-box)
-
-installer/scripts/build-package.sh --version 0.1.0 \
-  --atomdns atomdns/release/atomdns --sing-box dist-sing-box --webui atomdns/release/atom-webui.tar.gz
+# atomdns 和 WebUI：用 atomdns 的 scripts/build-rust-release.sh（VARIANTS="amd64 arm64-gnu amd64-musl arm64"，Linux x86_64 上，
+# 需要 Rust stable 和 Node.js），或 GitHub 上 release-build.yml 的产物：atomdns-linux-<变体>.tar.gz 和 atom-webui.tar.gz，放在同一个目录 DIR
+# sing-box 和安装器由打包脚本按架构编（需要 Go）
+installer/scripts/build-package.sh --version 0.1.0 --atomdns-dir DIR
 ```
 
-产物在 `installer/dist/`：`atom-<版本>-linux-amd64.tar.gz`、写好版本和 sha256 的 `install.sh`、`SHA256SUMS`。本地包可以用 `ATOM_PKG=<包> bash install.sh` 安装。
+产物在 `installer/dist/`：四个包 `atom-<版本>-linux-{amd64,arm64,amd64-musl,arm64-musl}.tar.gz`、写好版本和四个 sha256 的 `install.sh`、`SHA256SUMS`。本地包可以用 `ATOM_PKG=<包> bash install.sh` 安装。
 
 ## 许可证
 

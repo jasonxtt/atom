@@ -4,8 +4,16 @@
 
 ## 用户怎么装
 
+支持 Debian 12+ / Ubuntu 22.04+（systemd）和 Alpine 3.19+（OpenRC），x86_64 或 aarch64，不支持 Docker/LXC 容器。脚本按架构和系统选包。
+
 ```bash
 curl -fsSL <install.sh 的地址> | sudo bash
+```
+
+Alpine 上（脚本是 bash）：
+
+```bash
+apk add bash curl && curl -fsSL <install.sh 的地址> | bash
 ```
 
 脚本下载配套包（先 GitHub，慢或不通时依次换加速前缀）、校验 sha256、解到 `/opt/atom/pkg/`，起安装向导并打印地址：
@@ -24,7 +32,7 @@ atom 安装器已就绪，请在浏览器打开：
 /opt/atom/bin/atom-installer uninstall --purge  # 连数据一起删
 ```
 
-脚本的环境变量：`ATOM_MIRRORS`（加速前缀，空格分隔，设成空串就只直连）、`ATOM_REPO`（owner/name）、`ATOM_PKG`（本地包文件或地址，代替下载）。
+脚本的环境变量：`ATOM_MIRRORS`（加速前缀，空格分隔，设成空串就只直连）、`ATOM_REPO`（owner/name）、`ATOM_PKG`（本地包文件或地址，代替下载）、`ATOM_SHA256`（包必须有的 sha256，`skip` 关闭校验）。
 
 ## 装到哪里
 
@@ -37,7 +45,9 @@ atom 安装器已就绪，请在浏览器打开：
   backup/   升级前的备份（留最近 3 份）
 ```
 
-`/opt/atom` 之外只有：`/etc/systemd/system/atom-dns.service`、`atom-sing-box.service`，以及用"停用系统 DNS 占用"按钮时写的 `/etc/systemd/resolved.conf.d/atom.conf`（和把 `/etc/resolv.conf` 的链接指到上游列表）。nft 表 `inet atom`（网关形态再加 `ip atom_nat`）、`ip rule` 和 `ip_forward` 是内核运行时状态，由 `atom-dns.service` 的 `ExecStartPre` 在每次启动时建立。`changes.json` 记录安装器改过的系统设置，卸载时按它还原。
+OpenRC（Alpine）上还有 `lib/reload-sing-box.sh`；停用 53 端口的服务后若改写了 resolv.conf，原内容在 `etc/resolv.conf.orig`。
+
+`/opt/atom` 之外只有：`/etc/systemd/system/atom-dns.service`、`atom-sing-box.service`，以及用"停用系统 DNS 占用"按钮时写的 `/etc/systemd/resolved.conf.d/atom.conf`（和把 `/etc/resolv.conf` 的链接指到上游列表）。OpenRC 上服务是 `/etc/init.d/atom-dns`、`atom-sing-box`（supervise-daemon，`start_pre` 建立 nft、策略路由和 `ip_forward`），日志在 `/var/log/atom/`（卸载时删）；"停用"按钮对 OpenRC 服务是 `rc-service stop` 加 `rc-update del`，卸载时加回原来的运行级别并启动。nft 表 `inet atom`（网关形态再加 `ip atom_nat`）、`ip rule` 和 `ip_forward` 是内核运行时状态，由 `atom-dns.service` 的 `ExecStartPre` 在每次启动时建立。`changes.json` 记录安装器改过的系统设置，卸载时按它还原。
 
 ## 升级时哪些文件被覆盖
 
@@ -47,7 +57,7 @@ atom 安装器已就绪，请在浏览器打开：
 
 ```bash
 go vet ./... && go test ./...        # 纯函数的测试，Mac 上就能跑
-scripts/build-package.sh --version 0.1.0 --atomdns FILE --sing-box FILE --webui FILE   # 组装包和 install.sh
+scripts/build-package.sh --version 0.1.0 --atomdns-dir DIR   # 一次出四个包、install.sh、SHA256SUMS
 ```
 
-`install.sh.in` 是模板，`build-package.sh` 把版本和包的 sha256 写进去。包里的 `atom-installer` 是 Go 标准库写的单个静态文件，向导页面内嵌在里面（`web/index.html`）。
+DIR 里是 atomdns 的发布产物 `atomdns-linux-<变体>.tar.gz` 和 `atom-webui.tar.gz`；包与变体对应：amd64←`amd64`、arm64←`arm64-gnu`、amd64-musl←`amd64-musl`、arm64-musl←`arm64`。sing-box 和 `atom-installer` 由脚本按架构编。`install.sh.in` 是模板，`build-package.sh` 把版本和四个包的 sha256 写进去。包里的 `atom-installer` 是 Go 标准库写的单个静态文件，向导页面内嵌在里面（`web/index.html`）。
