@@ -195,12 +195,15 @@ func (ins *Installer) finalize() error {
 	if err != nil {
 		return err
 	}
+	hadMarker := hasData(ins.Paths) // a reconfigure keeps the marker of the data it found
 	if err := writeJSON(dataMarker(ins.Paths), map[string]string{"version": ins.Version}); err != nil {
 		return fmt.Errorf("记录安装结果失败：%w", err)
 	}
 	st.Complete, st.UpdatedAt = true, time.Now()
 	if err := writeJSON(ins.Paths.State(), st); err != nil {
-		os.Remove(dataMarker(ins.Paths))
+		if !hadMarker {
+			os.Remove(dataMarker(ins.Paths))
+		}
 		return fmt.Errorf("记录安装结果失败：%w", err)
 	}
 	return nil

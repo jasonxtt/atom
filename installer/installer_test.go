@@ -1632,3 +1632,20 @@ func TestDeptreeNeedsMeThroughVirtualsAndChains(t *testing.T) {
 		t.Errorf("%v", got)
 	}
 }
+
+func TestFinalizeFailureKeepsAnExistingDataMarker(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("needs a directory the process cannot write")
+	}
+	ins := &Installer{Paths: Paths{Root: t.TempDir()}, Version: "0.1.1"}
+	writeJSON(ins.Paths.State(), &InstallState{Version: "0.1.0", Complete: true})
+	writeJSON(dataMarker(ins.Paths), map[string]string{"version": "0.1.0"})
+	os.Chmod(filepath.Dir(ins.Paths.State()), 0o555) // the state cannot be written
+	defer os.Chmod(filepath.Dir(ins.Paths.State()), 0o755)
+	if err := ins.finalize(); err == nil {
+		t.Fatal("the state write must fail")
+	}
+	if !hasData(ins.Paths) {
+		t.Error("the marker of the data a reconfigure found must stay")
+	}
+}
