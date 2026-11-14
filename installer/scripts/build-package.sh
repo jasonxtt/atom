@@ -59,7 +59,7 @@ trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$OUT"
 
 # Check every atomdns before anything is built: right architecture (ELF e_machine: x86_64 0x3e, aarch64 0xb7),
-# glibc packages need nothing newer than Debian 12's glibc 2.36, musl packages must not reference glibc at all.
+# glibc packages need nothing newer than Ubuntu 22.04's glibc 2.35, musl packages must not reference glibc at all.
 for p in $PACKAGES; do
   IFS=: read -r pkgname arch variant <<<"$p"
   mkdir -p "$STAGE/x-$variant"
@@ -73,8 +73,8 @@ for p in $PACKAGES; do
   case "$pkgname" in
     *-musl) [ -z "$syms" ] || { echo "atomdns-linux-$variant.tar.gz is for musl but references glibc" >&2; exit 2; } ;;
     *) need="$(printf '%s\n' "$syms" | tail -1)"
-       if [ -n "$need" ] && [ "$(printf '%s\n2.36\n' "$need" | sort -V | tail -1)" != "2.36" ]; then
-         echo "atomdns-linux-$variant.tar.gz needs glibc $need, newer than Debian 12's 2.36; use the release-build.yml artifact" >&2; exit 2
+       if [ -n "$need" ] && [ "$(printf '%s\n2.35\n' "$need" | sort -V | tail -1)" != "2.35" ]; then
+         echo "atomdns-linux-$variant.tar.gz needs glibc $need, newer than Ubuntu 22.04's 2.35; use the release-build.yml artifact" >&2; exit 2
        fi ;;
   esac
 done

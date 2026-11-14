@@ -50,6 +50,8 @@ type Changes struct {
 	// ResolvConfSaved: /etc/resolv.conf held only loopback addresses, was replaced and its content is in
 	// etc/resolv.conf.orig (OpenRC).
 	ResolvConfSaved bool `json:"resolv_conf_saved,omitempty"`
+	// ResolvConfSavedLink: that /etc/resolv.conf was a link with this target; the link is put back.
+	ResolvConfSavedLink string `json:"resolv_conf_saved_link,omitempty"`
 }
 
 // UnitState is a service the installer stopped to free a port, as it was before.

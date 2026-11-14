@@ -1,11 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
-	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -177,6 +178,48 @@ func runlevelsOf(dir, svc string) []string {
 	return out
 }
 
+// defaultGateway is the gateway of the default route with the lowest metric in `ip -4 route show default`
+// (no metric is 0); the first of equals.
+func defaultGateway(text string) (string, error) {
+	best, bestMetric := "", -1
+	for _, line := range strings.Split(text, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 || f[0] != "default" {
+			continue
+		}
+		via, metric := "", 0
+		for i := 1; i+1 < len(f); i++ {
+			switch f[i] {
+			case "via":
+				via = f[i+1]
+			case "metric":
+				metric, _ = strconv.Atoi(f[i+1])
+			}
+		}
+		if ip := net.ParseIP(via); ip == nil || ip.To4() == nil {
+			continue
+		}
+		if bestMetric < 0 || metric < bestMetric {
+			best, bestMetric = via, metric
+		}
+	}
+	if best == "" {
+		return "", fmt.Errorf("找不到默认网关可以改成")
+	}
+	return best, nil
+}
+
+// probeDNS asks the server (host:port) for a common name; it answers or the freeing stops. A variable for the tests.
+var probeDNS = func(server string) error {
+	r := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "udp", server)
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err := r.LookupHost(ctx, "www.baidu.com")
+	return err
+}
+
 // freeOpenRCService stops an OpenRC service that holds a port and takes it out of its runlevels; how it was is
 // recorded first. When resolv.conf only names this machine, the dependencies are installed first (while names
 // still resolve) and resolv.conf then points at the default gateway; its content is saved for the uninstall.
@@ -186,18 +229,18 @@ func freeOpenRCService(p Paths, svc string, log Logger) error {
 	}
 	conf, _ := os.ReadFile(resolvConfPath)
 	lo := loopbackOnly(string(conf))
+	link, _ := os.Readlink(resolvConfPath) // resolv.conf may be a link (to /run/resolvconf/resolv.conf, say)
 	var gw string
 	if lo {
 		out, _ := quietCmd("ip", "-4", "route", "show", "default")
-		var gws []string
-		for _, v := range parseDefaultVia(out) {
-			gws = append(gws, v)
+		var err error
+		if gw, err = defaultGateway(out); err != nil {
+			return fmt.Errorf("/etc/resolv.conf 只指向本机，但%v", err)
 		}
-		sort.Strings(gws)
-		if len(gws) == 0 {
-			return fmt.Errorf("/etc/resolv.conf 只指向本机，但找不到默认网关可以改成")
+		// nothing is stopped or changed unless the gateway really answers DNS
+		if err := probeDNS(gw + ":53"); err != nil {
+			return fmt.Errorf("默认网关 %s 不能解析域名（%v），不停用 %s", gw, err, svc)
 		}
-		gw = gws[0]
 		if err := ensureDeps(p, false, log); err != nil {
 			return err
 		}
@@ -217,6 +260,7 @@ func freeOpenRCService(p Paths, svc string, log Logger) error {
 			return err
 		}
 		ch.ResolvConfSaved = true
+		ch.ResolvConfSavedLink = link
 	}
 	if err := saveChanges(p, ch); err != nil {
 		return err
@@ -240,15 +284,21 @@ func restoreResolvConf(p Paths, ch *Changes, log Logger) error {
 	if !ch.ResolvConfSaved {
 		return nil
 	}
-	data, err := os.ReadFile(p.Etc("resolv.conf.orig"))
-	if err != nil {
-		return err
-	}
-	if err := writeFileAtomic(resolvConfPath, data, 0o644); err != nil {
-		return err
+	if ch.ResolvConfSavedLink != "" { // it was a link: the link comes back, not a copy of what it led to
+		if err := replaceSymlink(resolvConfPath, ch.ResolvConfSavedLink); err != nil {
+			return err
+		}
+	} else {
+		data, err := os.ReadFile(p.Etc("resolv.conf.orig"))
+		if err != nil {
+			return err
+		}
+		if err := writeFileAtomic(resolvConfPath, data, 0o644); err != nil {
+			return err
+		}
 	}
 	os.Remove(p.Etc("resolv.conf.orig"))
-	ch.ResolvConfSaved = false
+	ch.ResolvConfSaved, ch.ResolvConfSavedLink = false, ""
 	log.Logf("已还原 /etc/resolv.conf")
 	return nil
 }

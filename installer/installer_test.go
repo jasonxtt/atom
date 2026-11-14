@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1445,5 +1446,135 @@ func TestBackupKeepsThePanelLoginPrivate(t *testing.T) {
 		if it.name == "data/webinfo/atom_auth.json" && (!it.file || it.mode != 0o600) {
 			t.Errorf("%+v", it)
 		}
+	}
+}
+
+func TestDefaultGatewayByMetric(t *testing.T) {
+	text := "default via 10.0.0.9 dev eth1 metric 300\ndefault via 10.0.0.1 dev eth0 metric 202\ndefault via 10.0.0.2 dev eth2 metric 1000\n"
+	if gw, err := defaultGateway(text); err != nil || gw != "10.0.0.1" {
+		t.Errorf("%q %v: the lowest metric wins, not the first or the smallest string", gw, err)
+	}
+	if gw, _ := defaultGateway("default via 10.0.0.9 dev eth1\ndefault via 10.0.0.1 dev eth0 metric 5\n"); gw != "10.0.0.9" {
+		t.Errorf("no metric is 0: %q", gw)
+	}
+	if gw, _ := defaultGateway("default via 10.0.0.7 dev a\ndefault via 10.0.0.3 dev b\n"); gw != "10.0.0.7" {
+		t.Errorf("equal metrics: the first, not the smaller string: %q", gw)
+	}
+	if _, err := defaultGateway("10.0.0.0/24 dev eth0 scope link\ndefault dev ppp0\n"); err == nil {
+		t.Error("no gateway")
+	}
+}
+
+func TestProbeDNSFailsWithoutAnAnswer(t *testing.T) {
+	// a UDP port nobody listens on, and a socket that never answers
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Skip(err)
+	}
+	addr := conn.LocalAddr().String()
+	defer conn.Close()
+	start := time.Now()
+	if err := probeDNS(addr); err == nil {
+		t.Error("a server that does not answer must fail the probe")
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Errorf("the probe took %v", time.Since(start))
+	}
+}
+
+func TestOpenRCServicesThatAreNeededGetNoButton(t *testing.T) {
+	ls := []Listener{{Proto: "udp", Addr: "*:53", Port: 53, PID: 10, Proc: "dnsmasq"}, {Proto: "udp", Addr: "*:53", Port: 53, PID: 11, Proc: "plain"}}
+	old := openrcNeeders
+	defer func() { openrcNeeders = old }()
+	openrcNeeders = func(svc string) []string {
+		if svc == "dnsmasq" {
+			return []string{"nfs"}
+		}
+		return nil
+	}
+	occ := occupantsOf(ls, 53, func(pid int) string { return map[int]string{10: "dnsmasq", 11: "plain"}[pid] }, true)
+	if len(occ) != 2 || occ[0].Kind != "" || occ[1].Kind != "openrc" {
+		t.Errorf("%+v", occ)
+	}
+	dry := " * stop: nfs dnsmasq\n"
+	if got := parseDryRunStop(dry, "dnsmasq"); strings.Join(got, ",") != "nfs" {
+		t.Errorf("%v", got)
+	}
+	if got := parseDryRunStop(" * stop: plain\n", "plain"); len(got) != 0 {
+		t.Errorf("%v", got)
+	}
+	tree := "depinfo_5_service='dnsmasq'\ndepinfo_5_needsme_0='nfs'\ndepinfo_5_needsme_1='atom-dns'\ndepinfo_5_usesme_0='x'\ndepinfo_6_service='net'\ndepinfo_6_needsme_0='dnsmasq'\n"
+	if got := deptreeNeedsMe(tree, "dnsmasq"); strings.Join(got, ",") != "nfs" {
+		t.Errorf("%v: needsme of this service only, not usesme, not our own", got)
+	}
+	if got := deptreeNeedsMe(tree, "nothing"); got != nil {
+		t.Errorf("%v", got)
+	}
+}
+
+func TestResolvConfLinkIsPutBack(t *testing.T) {
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "resolv.conf")
+	resolvConfPath = conf
+	defer func() { resolvConfPath = "/etc/resolv.conf" }()
+	p := Paths{Root: t.TempDir(), OpenRC: true}
+	os.Symlink("/run/resolvconf/resolv.conf", conf)
+	// the installer replaced the link with a file
+	os.Remove(conf)
+	os.WriteFile(conf, []byte("nameserver 10.0.0.1\n"), 0o644)
+	writeFileAtomic(p.Etc("resolv.conf.orig"), []byte("nameserver 127.0.0.1\n"), 0o644)
+	ch := &Changes{ResolvConfSaved: true, ResolvConfSavedLink: "/run/resolvconf/resolv.conf"}
+	if err := restoreResolvConf(p, ch, &recLogger{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.Readlink(conf); err != nil || got != "/run/resolvconf/resolv.conf" {
+		t.Errorf("link %q %v", got, err)
+	}
+	if ch.ResolvConfSaved || ch.ResolvConfSavedLink != "" {
+		t.Errorf("%+v", ch)
+	}
+	if _, err := os.Stat(p.Etc("resolv.conf.orig")); err == nil {
+		t.Error("the copy goes")
+	}
+	saveChanges(p, &Changes{ResolvConfSaved: true, ResolvConfSavedLink: "x"})
+	if loadChanges(p).ResolvConfSavedLink != "x" {
+		t.Error("recorded in changes.json")
+	}
+}
+
+type fakeInit struct{ stopped []string }
+
+func (f *fakeInit) Reload(Logger) error                { return nil }
+func (f *fakeInit) Enable(Logger, ...string) error     { return nil }
+func (f *fakeInit) DisableNow(Logger, ...string) error { return nil }
+func (f *fakeInit) Start(Logger, string) error         { return nil }
+func (f *fakeInit) Restart(Logger, string) error       { return nil }
+func (f *fakeInit) IsActive(string) string             { return "" }
+func (f *fakeInit) Logs(string) string                 { return "" }
+func (f *fakeInit) Forget(Logger, ...string)           {}
+func (f *fakeInit) Stop(_ Logger, n string) error      { f.stopped = append(f.stopped, n); return nil }
+
+func TestReconfigureRollbackStopsTheNewServicesFirst(t *testing.T) {
+	f := &fakeInit{}
+	(&reconfigureRun{}).quiesce(f, &recLogger{})
+	if strings.Join(f.stopped, ",") != "atom-dns.service,atom-sing-box.service" {
+		t.Errorf("%v", f.stopped)
+	}
+}
+
+func TestReconfigureRollbackRestoresRedirectsOfANewInterface(t *testing.T) {
+	dir := t.TempDir()
+	oldF, newF := filepath.Join(dir, "eth0"), filepath.Join(dir, "eth1")
+	os.WriteFile(oldF, []byte("0"), 0o644)
+	os.WriteFile(newF, []byte("0"), 0o644)
+	// the old state had the reply option on eth0; the new one moved it to eth1, whose value was 1
+	rc := &reconfigureRun{oldSt: InstallState{Topology: "bypass", ReplyVia: "10.0.0.1"}, oldCh: Changes{Reply: true, RedirectsBefore: map[string]string{oldF: "1"}}}
+	newCh := &Changes{Reply: true, RedirectsBefore: map[string]string{newF: "1"}}
+	rc.undoAdditions(newCh, &recLogger{})
+	if got, _ := os.ReadFile(newF); string(got) != "1" {
+		t.Errorf("eth1 is %q, want its old value 1", got)
+	}
+	if got, _ := os.ReadFile(oldF); string(got) != "0" {
+		t.Errorf("eth0 belongs to the old state (its start turns it off): %q", got)
 	}
 }

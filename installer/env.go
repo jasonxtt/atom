@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -315,13 +316,72 @@ func occupantsOf(ls []Listener, port int, unitOf func(pid int) string, openrc bo
 		}
 		switch {
 		case openrc && o.Unit != "":
-			o.Kind = "openrc"
+			// a service that others need comes back at boot with them: no button for it
+			if len(openrcNeeders(o.Unit)) == 0 {
+				o.Kind = "openrc"
+			}
 		case o.Unit == "systemd-resolved.service":
 			o.Kind = "resolved"
 		case o.Unit != "" && o.Unit != "atom-installer.service":
 			o.Kind = "unit"
 		}
 		out = append(out, *o)
+	}
+	return out
+}
+
+// openrcNeeders lists the services that `need` svc: stopping svc stops them, and the ones in a runlevel start it
+// again at boot. A variable for the tests.
+var openrcNeeders = func(svc string) []string {
+	var out []string
+	if text, _ := quietCmd("rc-service", "-Z", svc, "stop"); text != "" { // the dry run names what would stop
+		out = append(out, parseDryRunStop(text, svc)...)
+	}
+	if data, err := os.ReadFile("/run/openrc/deptree"); err == nil {
+		for _, n := range deptreeNeedsMe(string(data), svc) {
+			if len(runlevelsOf(runlevelsDir, n)) > 0 && !slices.Contains(out, n) {
+				out = append(out, n)
+			}
+		}
+	}
+	return out
+}
+
+// parseDryRunStop reads " * stop: a b svc" of `rc-service -Z svc stop`: the other names.
+func parseDryRunStop(text, svc string) []string {
+	var out []string
+	for _, line := range strings.Split(text, "\n") {
+		_, rest, ok := strings.Cut(line, "stop:")
+		if !ok {
+			continue
+		}
+		for _, n := range strings.Fields(rest) {
+			if n != svc && !isOurUnit(n) {
+				out = append(out, n)
+			}
+		}
+	}
+	return out
+}
+
+// deptreeNeedsMe reads the services that need svc from /run/openrc/deptree
+// (depinfo_<n>_service='svc', depinfo_<n>_needsme_<k>='other').
+func deptreeNeedsMe(text, svc string) []string {
+	idx := ""
+	for _, line := range strings.Split(text, "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok && strings.HasSuffix(k, "_service") && strings.Trim(v, `'"`) == svc {
+			idx = strings.TrimSuffix(strings.TrimPrefix(k, "depinfo_"), "_service")
+			break
+		}
+	}
+	if idx == "" {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(text, "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok && strings.HasPrefix(k, "depinfo_"+idx+"_needsme_") && !isOurUnit(strings.Trim(v, `'"`)) {
+			out = append(out, strings.Trim(v, `'"`))
+		}
 	}
 	return out
 }

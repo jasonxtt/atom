@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -36,11 +37,22 @@ func (ins *Installer) beginReconfigure(log Logger) (*reconfigureRun, error) {
 func (rc *reconfigureRun) restore(ins *Installer, log Logger) {
 	log.Logf("恢复备份")
 	newCh := loadChanges(ins.Paths)
+	rc.quiesce(ins.Paths.Init(), log)
 	// first what the new state added (ip_forward back to its old value resets accept_redirects of the
 	// interfaces, which the old services then turn off again when they start)
 	rc.undoAdditions(newCh, log)
 	if err := ins.restoreBackup(rc.dir, rc.oldSt.PanelPort, log); err != nil {
 		log.Logf("恢复备份出错：%v（备份在 %s）", err, rc.dir)
+	}
+}
+
+// quiesce stops the new services (and with them any restart the service manager still has pending for them), so
+// that nothing recreates what is undone next.
+func (rc *reconfigureRun) quiesce(init initSystem, log Logger) {
+	for _, n := range []string{dnsUnitName, singBoxUnitName} {
+		if err := init.Stop(log, n); err != nil {
+			log.Logf("  （忽略）%v", err)
+		}
 	}
 }
 
@@ -52,6 +64,13 @@ func (rc *reconfigureRun) undoAdditions(newCh *Changes, log Logger) {
 	}
 	if rc.oldSt.ReplyVia == "" && newCh.Reply {
 		undoReply(newCh, log)
+	}
+	for f, v := range newCh.RedirectsBefore { // an interface only the new state turned redirects off for
+		if _, old := rc.oldCh.RedirectsBefore[f]; !old {
+			if err := os.WriteFile(f, []byte(v), 0o644); err != nil {
+				log.Logf("  （忽略）恢复 %s: %v", f, err)
+			}
+		}
 	}
 	had := map[ClientRoute]bool{}
 	for _, r := range rc.oldCh.Routes {
