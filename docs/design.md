@@ -134,7 +134,7 @@ Rule {
 - "名单内客户端不走代理"（`listed_direct`）= "client ∈ 名单 → 直连"；
 - "仅名单内客户端走代理"（`only_listed_proxy`）= "client ∉ 名单 → 直连"（`client_invert: true`）。
 
-这条规则放在规则表最前面，这些客户端就完全不分流（连广告也不屏蔽）；放在"广告 → 屏蔽"下面，它们仍然屏蔽广告。没有客户端地址的查询（绑定账本的重算；进程内的查询，即 requery 和重写目标的解析，原来带的是伪造的 127.0.0.1，codex 第 4 轮后改成不带客户端）任何客户端条件都不命中，取反的也一样：没有客户端时谈不上"不在名单内"，而且这类规则只能直连或屏蔽，不影响 sing-box 的绑定（4.5.1）。`rules/test` 的 `client` 参数照样能测出取反的效果。
+这条规则放在规则表最前面，这些客户端就完全不分流（连屏蔽规则也不生效）；放在某条屏蔽规则下面，那条屏蔽对它们仍然有效。没有客户端地址的查询（绑定账本的重算；进程内的查询，即 requery 和重写目标的解析，原来带的是伪造的 127.0.0.1，codex 第 4 轮后改成不带客户端）任何客户端条件都不命中，取反的也一样：没有客户端时谈不上"不在名单内"，而且这类规则只能直连或屏蔽，不影响 sing-box 的绑定（4.5.1）。`rules/test` 的 `client` 参数照样能测出取反的效果。
 
 带 `client` 条件的规则，动作只能是直连或屏蔽，不能是代理。**[定]** 原因：sing-box 只按域名绑定出站组，不区分客户端。比如"客户端 A 的 foo.com → 组 X"：A 一查就发 SET X，于是别的客户端拿到 foo.com 的 FakeIP 后也走 X。别的客户端从缓存拿到 FakeIP 时不发 CLEAR；不走缓存时，A 的 SET 和别人的 CLEAR 会来回覆盖。所以代理规则对所有客户端都一样，客户端条件只用来决定这个客户端能不能走代理（直连或屏蔽）。sing-box 不增加按客户端分流的功能。API 新建或修改这种规则时返回 400。
 
@@ -150,18 +150,20 @@ Rule {
 
 新安装时的默认规则表 **[定]**：
 
-1. 局域网和私有域名 → 直连（后缀 `lan`、`local`、`localhost`、`localdomain`、`home.arpa`、`internal`）
-2. 代理修正 → 代理到 Final（`ruleset: cusnocn`：geosite-cn 里其实在国外的域名）
-3. 直连修正 → 直连（`ruleset: cuscn`：geolocation-!cn 里其实在国内的域名）
+1. 代理修正 → 代理到 Final（`ruleset: cusnocn`：geosite-cn 里其实在国外的域名）
+2. 直连修正 → 直连（`ruleset: cuscn`：geolocation-!cn 里其实在国内的域名）
 
-原来第 2 条是"广告 → 屏蔽（`ruleset: adguard`）"，2026-11-14 用户定去掉 **[定]**：`adguard` 的来源是原作者自己的几份名单，界面上看不到也改不了。内置规则集 `adguard` 仍然保留在规则集页（可以删、可以被规则引用）；要屏蔽广告，从目录里选规则集写一条屏蔽规则。已经写过 `atom_rules.json` 的安装不受影响（规则表照旧）。
+原来前面还有两条，2026-11-14 用户定都去掉 **[定]**：
+
+- "局域网和私有域名 → 直连"（后缀 `lan`、`local`、`localhost`、`localdomain`、`home.arpa`、`internal`）。去掉以后这些域名和其他域名一样走原判断；要直连或交给指定的上游组（比如本地路由器），自己写一条规则。
+- "广告 → 屏蔽（`ruleset: adguard`）"：`adguard` 的来源是原作者自己的几份名单，界面上看不到也改不了。内置规则集 `adguard` 仍然保留在规则集页（可以删、可以被规则引用）；要屏蔽广告，从目录里选规则集写一条屏蔽规则。已经写过 `atom_rules.json` 的安装不受影响（规则表照旧）。
 
 其余全部交给原判断。`atom_rules.json` 不存在时使用默认规则表，第一次修改时才写文件（`atomdns check` 不会写）。配置里没有对应的内置规则集时，那一条不放。
 
 自带名单并入规则表（第 6 步）**[定]**：
 
 - 黑名单、白名单、灰名单删除：插件、`unified_matcher1` 条目、名单文件、原判断里的分支和 `block_blocklist` 开关都删掉。这三份是原作者个人的名单，分享版不带；要屏蔽、代理、直连某些域名，直接写规则。原来黑名单返回 NXDOMAIN，规则表的屏蔽是空应答。
-- `cuscn`、`cusnocn` 是公共的修正列表（nekolsd 的 sing-geosite），配置里带着 srs 文件，所以做成内置规则集（`atom_rules.yaml` 的 `builtin`，和 `geosite_cn` 一样按 mapper 打的 fast_mark 判断），不做成远程规则集：新装时还没有节点，经 7890 下载会被空的默认组拒绝。它们在原判断里排在 geosite 前面，现在是默认规则表的第 3、4 条；原判断里的 13、15 分支删除。原来 `cusnocn` 发 CLEAR 走 Final，现在发 SET `final`，出口一样。
+- `cuscn`、`cusnocn` 是公共的修正列表（nekolsd 的 sing-geosite），配置里带着 srs 文件，所以做成内置规则集（`atom_rules.yaml` 的 `builtin`，和 `geosite_cn` 一样按 mapper 打的 fast_mark 判断），不做成远程规则集：新装时还没有节点，经 7890 下载会被空的默认组拒绝。它们在原判断里排在 geosite 前面，现在是默认规则表的两条；原判断里的 13、15 分支删除。原来 `cusnocn` 发 CLEAR 走 Final，现在发 SET `final`，出口一样。
 - 不写迁移：atom 还没发布过。
 - 内置规则集可以重新下载：`POST rulesets/{id}/refresh` 对 `adguard`、`geosite_cn`、`geosite_no_cn`、`cuscn`、`cusnocn` 有效（`GET rulesets` 里 `refreshable: true`），下载完照常清缓存、重算账本。
 - 第 6b 步 **[定]**：`geoip_cn` 也列在规则集里（`atom_rules` 的 `ip_builtin`），可以刷新、改地址，规则不能引用（`usable: false`）。`geosite_cn`、`geosite_no_cn`、`geoip_cn` 是原判断必需的，不能删；`adguard`、`cuscn`、`cusnocn` 可以删（`DELETE rulesets/{id}`，有规则引用时 409，带 `confirm=true` 先把它从这些规则里去掉，只剩客户端条件或没有条件的规则一起删；删掉的记在 `webinfo/atom_builtin.json`）。只有一个下载来源的内置规则集可以改地址（`PUT rulesets/{id} {url}`，改完立即下载）；`adguard` 有多个来源，不能整体改地址（409）。内置规则集打开了 AtomDNS 原有的每日自动更新（`srs/*.json`、`adguard/config.json` 的 `auto_update`）；自动更新仍然不清缓存、不重算账本（4.5.1 的已知限制）。
@@ -582,7 +584,7 @@ atom/          jasonxtt/atom
 9. **规则页：原判断和内置规则集选择**（2026-11-12，用户定）**[定]**：
    - 规则列表最后固定一行"未命中以上规则"，带 DNS 标签：这部分是 AtomDNS 的 DNS 判断（3.1 第 3 层），不是 sing-box 的路由规则。不能拖动、编辑、删除。展开后按配置里的实际顺序列出 A/AAAA 查询的分支（`sequence_6666` 规则表之后、`process_listed.yaml`、`process_v4/v6.yaml`）：学到的无 V4 / 无 V6 → 空应答；`geosite_no_cn` → FakeIP · 代理 · 兜底分组；`geosite_cn` → 直连 · 国内 DNS；记忆代理 → FakeIP · 代理 · 兜底分组；记忆直连 → 直连（兼容模式国内 DNS，安全模式国外 DNS）；其余 → 按核心模式探测（兼容国内 DNS，安全国外 DNS）：国内 IP 或 `direct_ip` 直连，其他 IP FakeIP · 代理 · 兜底分组，上游没有给 IP 的不给地址（AAAA 学"无 V6"；兼容模式下 AAAA 失败也走 FakeIP，sing-box 对 AAAA 不给地址），并学习。注意 `geosite_no_cn` 排在 `geosite_cn` 前面、记忆代理排在记忆直连前面，这是 YAML 的顺序。
    - 开关按 `GET dns` 的实际状态显示：空应答那一支要"空结果屏蔽"开着、对应学习类别生效；学习类别生效 = 总开关且类别开关（和 `route_learner` 编译时一样）；关掉的分支标"关"。跳转：geosite → 规则集页对应的默认规则集（`/rules/sets?set=<id>`），学习类分支 → DNS 高级设置的域名学习，其余 → 核心模式（`/dns/settings?at=learning|mode`）。代码 `webui/src/original.ts`（测试 `tests/original.test.mjs`）。
-   - 新建条件的规则集选择框只列 MetaCubeX 和 blackmatrix7 的目录条目，不再列默认规则集（`adguard`、`geosite_cn`、`geosite_no_cn`、`cuscn`、`cusnocn`）。已经引用默认规则集的规则（默认规则表第 2、3 条，以及旧安装里的广告规则）照常显示、编辑、保存，可以删掉这个条件；删掉以后不能再从选择框选回来（用户接受：广告规则改用目录里的规则集）。
+   - 新建条件的规则集选择框只列 MetaCubeX 和 blackmatrix7 的目录条目，不再列默认规则集（`adguard`、`geosite_cn`、`geosite_no_cn`、`cuscn`、`cusnocn`）。已经引用默认规则集的规则（默认规则表的两条修正，以及旧安装里的广告规则）照常显示、编辑、保存，可以删掉这个条件；删掉以后不能再从选择框选回来（用户接受：广告规则改用目录里的规则集）。
 
 10. **规则页：测试域名改成 dry-run**（2026-11-12，用户定）**[定]**：测试框调用 `POST rules/dryrun`（第 8 节），按真实流程的顺序列出每一步命中与否和原因，给出结论；代理时把组按 sing-box 当前选中项展开到节点；对照绑定账本。探测真的查上游但不留痕迹，不读不写缓存。代码 `webui/src/dryrun.ts`（测试 `tests/dryrun.test.mjs`）、`RulesPage.vue`。
 
