@@ -364,25 +364,59 @@ func parseDryRunStop(text, svc string) []string {
 	return out
 }
 
-// deptreeNeedsMe reads the services that need svc from /run/openrc/deptree
-// (depinfo_<n>_service='svc', depinfo_<n>_needsme_<k>='other').
+// deptreeNeedsMe lists the services that need svc, directly, through a virtual service svc provides (dnsmasq
+// provides "dns"), or through a chain of needs, from /run/openrc/deptree (depinfo_<n>_service='x',
+// depinfo_<n>_needsme_<k>='y', depinfo_<n>_providedby_<k>='z').
 func deptreeNeedsMe(text, svc string) []string {
-	idx := ""
+	idx := map[string]string{} // service -> n
+	needsme := map[string][]string{}
+	providedBy := map[string][]string{} // virtual -> providers
 	for _, line := range strings.Split(text, "\n") {
-		if k, v, ok := strings.Cut(line, "="); ok && strings.HasSuffix(k, "_service") && strings.Trim(v, `'"`) == svc {
-			idx = strings.TrimSuffix(strings.TrimPrefix(k, "depinfo_"), "_service")
-			break
+		k, v, ok := strings.Cut(line, "=")
+		if !ok || !strings.HasPrefix(k, "depinfo_") {
+			continue
+		}
+		v = strings.Trim(v, `'"`)
+		rest := strings.TrimPrefix(k, "depinfo_")
+		n, field, ok := strings.Cut(rest, "_")
+		if !ok {
+			continue
+		}
+		switch {
+		case field == "service":
+			idx[v] = n
+		case strings.HasPrefix(field, "needsme_"):
+			needsme[n] = append(needsme[n], v)
+		case strings.HasPrefix(field, "providedby_"):
+			providedBy[n] = append(providedBy[n], v)
 		}
 	}
-	if idx == "" {
-		return nil
+	virtuals := map[string][]string{} // provider -> virtual services
+	for name, n := range idx {
+		for _, p := range providedBy[n] {
+			virtuals[p] = append(virtuals[p], name)
+		}
 	}
+	seen := map[string]bool{svc: true}
+	queue := []string{svc}
 	var out []string
-	for _, line := range strings.Split(text, "\n") {
-		if k, v, ok := strings.Cut(line, "="); ok && strings.HasPrefix(k, "depinfo_"+idx+"_needsme_") && !isOurUnit(strings.Trim(v, `'"`)) {
-			out = append(out, strings.Trim(v, `'"`))
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		next := append([]string{}, virtuals[cur]...)
+		if n, ok := idx[cur]; ok {
+			next = append(next, needsme[n]...)
+		}
+		for _, x := range next {
+			if seen[x] || isOurUnit(x) {
+				continue
+			}
+			seen[x] = true
+			queue = append(queue, x)
+			out = append(out, x)
 		}
 	}
+	sort.Strings(out)
 	return out
 }
 

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"context"
+	"crypto/rand"
 	"fmt"
 	"net"
 	"os"
@@ -209,15 +209,40 @@ func defaultGateway(text string) (string, error) {
 	return best, nil
 }
 
-// probeDNS asks the server (host:port) for a common name; it answers or the freeing stops. A variable for the tests.
+// probeDNS sends the server (host:port) a query for a common name and wants an answer to it (not the hosts file,
+// which a resolver library would read first). A variable for the tests.
 var probeDNS = func(server string) error {
-	r := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-		return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "udp", server)
-	}}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	_, err := r.LookupHost(ctx, "www.baidu.com")
-	return err
+	var id [2]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return err
+	}
+	q := []byte{id[0], id[1], 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0}
+	for _, label := range strings.Split("www.baidu.com", ".") {
+		q = append(q, byte(len(label)))
+		q = append(q, label...)
+	}
+	q = append(q, 0, 0, 1, 0, 1) // A, IN
+	conn, err := net.DialTimeout("udp", server, 3*time.Second)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := conn.Write(q); err != nil {
+		return err
+	}
+	buf := make([]byte, 1500)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return err
+	}
+	if n < 12 || buf[0] != id[0] || buf[1] != id[1] || buf[2]&0x80 == 0 {
+		return fmt.Errorf("不是 DNS 应答")
+	}
+	if rcode := buf[3] & 0x0f; rcode != 0 || buf[6] == 0 && buf[7] == 0 {
+		return fmt.Errorf("应答没有记录（rcode %d）", rcode)
+	}
+	return nil
 }
 
 // freeOpenRCService stops an OpenRC service that holds a port and takes it out of its runlevels; how it was is

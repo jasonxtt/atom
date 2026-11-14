@@ -1578,3 +1578,57 @@ func TestReconfigureRollbackRestoresRedirectsOfANewInterface(t *testing.T) {
 		t.Errorf("eth0 belongs to the old state (its start turns it off): %q", got)
 	}
 }
+
+func TestProbeDNSNeedsARealAnswer(t *testing.T) {
+	serve := func(reply func(q []byte) []byte) string {
+		conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Skip(err)
+		}
+		t.Cleanup(func() { conn.Close() })
+		go func() {
+			buf := make([]byte, 1500)
+			for {
+				n, from, err := conn.ReadFrom(buf)
+				if err != nil {
+					return
+				}
+				if r := reply(append([]byte{}, buf[:n]...)); r != nil {
+					conn.WriteTo(r, from)
+				}
+			}
+		}()
+		return conn.LocalAddr().String()
+	}
+	answer := func(q []byte) []byte { // header with QR, one answer count
+		r := append([]byte{}, q...)
+		r[2], r[3], r[6], r[7] = 0x81, 0x80, 0, 1
+		return r
+	}
+	if err := probeDNS(serve(answer)); err != nil {
+		t.Errorf("a good answer: %v", err)
+	}
+	if err := probeDNS(serve(func(q []byte) []byte { r := answer(q); r[0] ^= 0xff; return r })); err == nil {
+		t.Error("an answer to another question")
+	}
+	if err := probeDNS(serve(func(q []byte) []byte { r := answer(q); r[3] = 0x83; return r })); err == nil {
+		t.Error("NXDOMAIN is no answer")
+	}
+	if err := probeDNS(serve(func(q []byte) []byte { r := answer(q); r[7] = 0; return r })); err == nil {
+		t.Error("an answer without records")
+	}
+}
+
+func TestDeptreeNeedsMeThroughVirtualsAndChains(t *testing.T) {
+	tree := "depinfo_1_service='dnsmasq'\n" +
+		"depinfo_2_service='dns'\ndepinfo_2_providedby_0='dnsmasq'\ndepinfo_2_needsme_0='squid'\n" +
+		"depinfo_3_service='squid'\ndepinfo_3_needsme_0='proxyapp'\n" +
+		"depinfo_4_service='proxyapp'\ndepinfo_5_service='other'\ndepinfo_5_needsme_0='proxyapp2'\n"
+	got := deptreeNeedsMe(tree, "dnsmasq")
+	if strings.Join(got, ",") != "dns,proxyapp,squid" {
+		t.Errorf("%v", got)
+	}
+	if got := deptreeNeedsMe(tree, "other"); strings.Join(got, ",") != "proxyapp2" {
+		t.Errorf("%v", got)
+	}
+}
