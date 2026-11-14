@@ -1406,3 +1406,44 @@ func TestBeginReconfigureBacksUp(t *testing.T) {
 		t.Errorf("%+v", rc.oldSt)
 	}
 }
+
+func TestOwnRoutesChangedGateway(t *testing.T) {
+	old := ClientRoute{"10.1.0.0/24", "192.168.1.2", "eth1"}
+	now := ClientRoute{"10.1.0.0/24", "192.168.1.3", "eth1"}
+	existing := func(ClientRoute) string { return "10.1.0.0/24 via 192.168.1.2 dev eth1 " }
+	log := &recLogger{}
+	got, err := ownRoutes([]ClientRoute{old}, []ClientRoute{now}, existing, log)
+	if err != nil || len(got) != 1 || got[0] != now {
+		t.Fatalf("%v %v", got, err)
+	}
+	if !log.ran("ip route del 10.1.0.0/24 via 192.168.1.2") {
+		t.Errorf("the old route goes: %v", log.lines)
+	}
+	if _, err := ownRoutes(nil, []ClientRoute{now}, existing, log); err == nil {
+		t.Error("a route the installer did not add is still a conflict")
+	}
+}
+
+func TestBackupKeepsThePanelLoginPrivate(t *testing.T) {
+	p := Paths{Root: t.TempDir(), UnitDir: t.TempDir()}
+	ins := &Installer{Paths: p}
+	auth := filepath.Join(p.Data(), "webinfo", "atom_auth.json")
+	os.MkdirAll(filepath.Dir(auth), 0o755)
+	os.WriteFile(auth, []byte(`{"key":"k"}`), 0o600)
+	dir := filepath.Join(p.Backup(), "b")
+	if err := ins.makeBackup(dir); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(filepath.Join(dir, "data/webinfo/atom_auth.json"))
+	if err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("%v %v", st, err)
+	}
+	// a login the failed run created is removed; the old one comes back
+	os.WriteFile(auth, []byte(`{"key":"new"}`), 0o600)
+	os.MkdirAll(filepath.Join(p.Data(), "sub_config"), 0o755)
+	for _, it := range ins.backupItems() {
+		if it.name == "data/webinfo/atom_auth.json" && (!it.file || it.mode != 0o600) {
+			t.Errorf("%+v", it)
+		}
+	}
+}

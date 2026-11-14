@@ -30,16 +30,18 @@ func (ins *Installer) beginReconfigure(log Logger) (*reconfigureRun, error) {
 	return rc, nil
 }
 
-// restore puts the old configuration back after a failed reconfigure: the files, then the services (their
-// start step loads the old nft rules and routing again), then whatever the new state added that the old one
-// did not have. It never takes the network down.
+// restore puts the old configuration back after a failed reconfigure: whatever the new state added that the old
+// one did not have, then the files (the panel login included) and the services (their start step loads the old
+// nft rules and routing again). It never takes the network down.
 func (rc *reconfigureRun) restore(ins *Installer, log Logger) {
 	log.Logf("恢复备份")
 	newCh := loadChanges(ins.Paths)
+	// first what the new state added (ip_forward back to its old value resets accept_redirects of the
+	// interfaces, which the old services then turn off again when they start)
+	rc.undoAdditions(newCh, log)
 	if err := ins.restoreBackup(rc.dir, rc.oldSt.PanelPort, log); err != nil {
 		log.Logf("恢复备份出错：%v（备份在 %s）", err, rc.dir)
 	}
-	rc.undoAdditions(newCh, log)
 }
 
 // undoAdditions removes what a run left in the live network that the old state does not have: the NAT table

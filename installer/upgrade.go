@@ -125,7 +125,7 @@ type backupItem struct {
 	mode       os.FileMode // of a file item when put back; 0 is 0644
 }
 
-// backed up: programs, the state and network files, the shipped configuration (not the data), the WebUI.
+// backed up: programs, the state and network files, the shipped configuration (not the data), the WebUI, the panel login.
 func (ins *Installer) backupItems() []backupItem {
 	p := ins.Paths
 	return []backupItem{
@@ -136,6 +136,7 @@ func (ins *Installer) backupItems() []backupItem {
 		{path: filepath.Join(p.Data(), "ui", "main"), name: "data/ui/main", exact: true},
 		{path: filepath.Join(p.Data(), "config_custom.yaml"), name: "data/config_custom.yaml", file: true},
 		{path: filepath.Join(p.Data(), "rule", "atom_catalog.json"), name: "data/rule/atom_catalog.json", file: true},
+		{path: filepath.Join(p.Data(), "webinfo", "atom_auth.json"), name: "data/webinfo/atom_auth.json", file: true, mode: 0o600}, // the panel login: a failed reconfigure puts it back
 		{path: p.DNSUnit(), name: "units/" + filepath.Base(p.DNSUnit()), file: true, mode: p.unitMode()},
 		{path: p.SingBoxUnit(), name: "units/" + filepath.Base(p.SingBoxUnit()), file: true, mode: p.unitMode()},
 	}
@@ -157,7 +158,11 @@ func (ins *Installer) makeBackup(dir string) error {
 		}
 		var err error
 		if it.file {
-			err = copyFileAtomic(it.path, filepath.Join(dir, it.name), 0o644)
+			mode := it.mode
+			if mode == 0 {
+				mode = 0o644
+			}
+			err = copyFileAtomic(it.path, filepath.Join(dir, it.name), mode)
 		} else {
 			err = copyTree(it.path, filepath.Join(dir, it.name))
 		}

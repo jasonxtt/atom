@@ -219,6 +219,11 @@ mkdir -p "$PKG"
 tar -xzf "$PKGFILE" -C "$PKG" --strip-components=1 || die "解包失败"
 [ -x "$PKG/bin/atom-installer" ] || die "包里没有 atom-installer"
 
+# the first installation may have finished while the package was downloaded: it is upgraded then
+if [ -z "$INSTALLED" ] && grep -qs '"complete": true' "$ROOT/etc/install.json"; then
+  INSTALLED=1
+  ACTION=upgrade
+fi
 WIZARD_ARGS=""
 if [ -n "$INSTALLED" ]; then
   before="$(installed_version)"

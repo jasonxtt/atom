@@ -797,6 +797,16 @@ func undoReply(ch *Changes, log Logger) {
 // ones that are not in the routing table yet. A route the machine already has with the same gateway and
 // interface stays the machine's; one with another gateway is a conflict. Routes it added before and no longer
 // wants are deleted here. existing returns `ip -4 route show exact <net>`.
+// mine: out (`ip route show exact <net>`) is one of the routes the installer added before for this network.
+func mine(before []ClientRoute, net, out string) bool {
+	for _, b := range before {
+		if b.Net == net && strings.Contains(out, "via "+b.Via+" ") && strings.Contains(out+" ", "dev "+b.Dev+" ") {
+			return true
+		}
+	}
+	return false
+}
+
 func ownRoutes(before, want []ClientRoute, existing func(ClientRoute) string, log Logger) ([]ClientRoute, error) {
 	had := map[ClientRoute]bool{}
 	for _, r := range before {
@@ -817,6 +827,10 @@ func ownRoutes(before, want []ClientRoute, existing func(ClientRoute) string, lo
 		}
 		if strings.Contains(out, "via "+r.Via+" ") && strings.Contains(out+" ", "dev "+r.Dev+" ") {
 			log.Logf("路由 %s via %s 已经有了，保留原样", r.Net, r.Via)
+			continue
+		}
+		if mine(before, r.Net, out) { // the installer's own route of this network, now with another gateway: it is replaced
+			owned = append(owned, r)
 			continue
 		}
 		return nil, fmt.Errorf("网段 %s 已经有路由（%s），和填写的网关 %s 不一致", r.Net, out, r.Via)
