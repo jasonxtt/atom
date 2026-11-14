@@ -451,7 +451,7 @@ func (ins *Installer) stepStart(cfg Config, j *Job) error {
 		ins.journal(j, dnsUnitName)
 		return err
 	}
-	api := newAPIClient(cfg.PanelPort)
+	api := newAPIClient(cfg.PanelPort, ins.Paths.Data())
 	if _, err := api.waitStatus(60*time.Second, func(*apiStatus) bool { return true }); err != nil {
 		ins.journal(j, dnsUnitName)
 		return fmt.Errorf("atomdns 的管理接口没有起来: %w", err)
@@ -468,7 +468,7 @@ func (ins *Installer) journal(j *Job, unit string) {
 }
 
 func (ins *Installer) stepSettings(cfg Config, j *Job) error {
-	api := newAPIClient(cfg.PanelPort)
+	api := newAPIClient(cfg.PanelPort, ins.Paths.Data())
 	// the first sing-box configuration is applied by atomdns at start; wait for it before changing more
 	if _, err := api.waitStatus(90*time.Second, func(s *apiStatus) bool { return s.SingBox.Running && s.SingBox.InSync }); err != nil {
 		return fmt.Errorf("sing-box 没有起来: %w", err)
@@ -476,8 +476,10 @@ func (ins *Installer) stepSettings(cfg Config, j *Job) error {
 	j.Logf("sing-box 已启动")
 	if cfg.keepData {
 		j.Logf("沿用已有的设置、规则和节点")
+		setLogin(api, cfg, j)
 		return nil
 	}
+	defer setLogin(api, cfg, j)
 	warn := func(what string, err error) { j.warn("%s 没有应用（可以在面板里改）：%v", what, err) }
 	for _, g := range []struct {
 		tag, what, text string
@@ -531,6 +533,19 @@ func (ins *Installer) stepSettings(cfg Config, j *Job) error {
 	return nil
 }
 
+// setLogin sets the panel login the wizard was given (last: from then on every request needs the key).
+func setLogin(api *apiClient, cfg Config, j *Job) {
+	user := strings.TrimSpace(cfg.PanelUser)
+	if user == "" {
+		return
+	}
+	if err := api.call("PUT", "/auth", map[string]any{"username": user, "password": cfg.PanelPassword}, nil); err != nil {
+		j.warn("面板登录没有设置（可以在面板的设置页里设）：%v", err)
+		return
+	}
+	j.Logf("已设置面板登录，用户名 %s", user)
+}
+
 // importNodes imports the pasted nodes and makes them the members of the built-in default group; a node that
 // is in no group carries no traffic, and the default group is what Final selects.
 func importNodes(api *apiClient, text string) ([]string, error) {
@@ -561,7 +576,7 @@ func importNodes(api *apiClient, text string) ([]string, error) {
 }
 
 func (ins *Installer) stepCheck(cfg Config, j *Job) error {
-	api := newAPIClient(cfg.PanelPort)
+	api := newAPIClient(cfg.PanelPort, ins.Paths.Data())
 	st, err := api.waitStatus(90*time.Second, func(s *apiStatus) bool { return s.SingBox.Running && s.SingBox.InSync })
 	if err != nil {
 		msg := "sing-box 没有处于最新配置"

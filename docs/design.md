@@ -151,9 +151,10 @@ Rule {
 新安装时的默认规则表 **[定]**：
 
 1. 局域网和私有域名 → 直连（后缀 `lan`、`local`、`localhost`、`localdomain`、`home.arpa`、`internal`）
-2. 广告 → 屏蔽（`ruleset: adguard`，按 AdGuard 规则自己的屏蔽/放行判断）
-3. 代理修正 → 代理到 Final（`ruleset: cusnocn`：geosite-cn 里其实在国外的域名）
-4. 直连修正 → 直连（`ruleset: cuscn`：geolocation-!cn 里其实在国内的域名）
+2. 代理修正 → 代理到 Final（`ruleset: cusnocn`：geosite-cn 里其实在国外的域名）
+3. 直连修正 → 直连（`ruleset: cuscn`：geolocation-!cn 里其实在国内的域名）
+
+原来第 2 条是"广告 → 屏蔽（`ruleset: adguard`）"，2026-11-14 用户定去掉 **[定]**：`adguard` 的来源是原作者自己的几份名单，界面上看不到也改不了。内置规则集 `adguard` 仍然保留在规则集页（可以删、可以被规则引用）；要屏蔽广告，从目录里选规则集写一条屏蔽规则。已经写过 `atom_rules.json` 的安装不受影响（规则表照旧）。
 
 其余全部交给原判断。`atom_rules.json` 不存在时使用默认规则表，第一次修改时才写文件（`atomdns check` 不会写）。配置里没有对应的内置规则集时，那一条不放。
 
@@ -377,7 +378,7 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
 | AtomDNS 原有的 WebUI 和规则名单 API | 第 6 步删除接口（6a）；`webui-log/` 前端工程在 6b 换成新 WebUI 时删除。删掉的 HTTP 接口：`/plugins/{tag}/...`（名单的 show/save/post、规则源的 config/rules/update、缓存的 flush/dump/load_dump、`requery`、`webinfo`、重写、域名学习、`domain_output`）、`/api/v1/special-groups`、`/api/v1/upstream/*`、`/api/v1/capabilities`、`/api/v1/settings/effective`、`/api/v1/flags*`、`/api/v1/cache/settings*`、`/api/v1/cache/inventory`、`/api/v1/learning/settings`、`/api/v1/overrides`、`/api/v1/domain-generation`、`/api/v1/system/webui-port`、`/api/v1/system/restart`（连同进程内重启），都返回 404。它们背后还被保留的功能用着的部分改走 atom 接口（7.2、第 8 节）。`requery` 定时任务在进程内调用缓存和学习名单的 save/flush，这些 `/plugins` 路由保留为进程内入口，不对 HTTP 开放。保留的原有接口：`/api/v1/system/health`、`/metrics`、审计（`/api/v1/audit/*`、`/api/v2/audit/*`）、诊断抓取（`/api/v1/capture/*`），都只读或只管诊断，不在 OpenAPI 规范里，不承诺稳定 |
 | YAML 配置 | 由产品自带，用户不改。放在 fork 的 `config/`，来自 `jasonxtt/file` 的 `atomdns/config/full/config_rust`（v0.6.4，schema 7），改动见 `config/README.md` |
 | sing-box `cache_file.store_fakeip` | 固定开 |
-| 管理 API 监听地址 | 监听局域网，暂不做登录鉴权 **[定]**；端口由安装器写入，默认 80（第 7 步） |
+| 管理 API 监听地址 | 监听局域网；端口由安装器写入，默认 80（第 7 步）。面板登录可选（2026-11-14 加上，见第 8 节"面板登录"）**[定]** |
 
 ### 7.2 开放（通过控制面 API 修改）
 
@@ -447,7 +448,12 @@ sing-box 的绑定只在收到 DNS 查询时更新，而客户端会缓存 DNS �
   - 重算账本不模拟这两项（4.5.1 已知限制），改它们不触发重算。
 - 内置规则集：`GET rulesets` 里是 `{id, name, type: builtin, refreshable}`；`POST rulesets/{id}/refresh` 返回 `{id, sources, updated}`，一个来源都没下载成功时 502、列表不变。同一个来源正在下载（启动时的下载、另一次刷新）时先等它结束，再下载一次（codex 第 1 轮）。
 - 错误格式沿用 AtomDNS 现有的格式。**[定]**
-- 暂不做鉴权。**[定]**
+- **面板登录**（2026-11-14，用户定：登录页 + Cookie，安装器里可以留空，设置页可以改）**[定]**，代码 `rust/native-host/src/panel_auth.rs`：
+  - 凭据在 `webinfo/atom_auth.json`（0600）：用户名、密码的 PBKDF2-HMAC-SHA256 哈希（10 万次，随机盐，在阻塞线程里算）、一个随机密钥。没有这个文件就不需要登录，和原来一样。
+  - 有文件时，除了 UI 文件、`/api/v1/system/health` 和 `auth`、`auth/login` 以外的请求（atom API、`/metrics`、审计、`/plugins`、诊断抓取）都要带会话 Cookie `atom_session`（登录时发，30 天，HttpOnly、SameSite=Strict，内容是"过期时间 + 用密钥算的 HMAC"），或 `Authorization: Bearer <密钥>`（安装器以 root 读这个文件拿密钥，升级、保留数据重装时调接口用），否则 401。
+  - 接口：`GET auth`（`{enabled, authenticated, username}`）；`PUT auth {username, password, current_password?}` 设置或修改，换新密钥（所有会话失效），给当前浏览器发新 Cookie；`DELETE auth {current_password?}` 关闭登录；`POST auth/login`（错误时等 1 秒再返回 401）；`POST auth/logout` 清掉 Cookie。已开登录、用会话改的时候要给当前密码。
+  - WebUI：未登录时整个界面换成登录页；顶栏有退出按钮；设置页"面板登录"可以设置、修改、关闭。安装器：网络那一步面板端口下面有可选的用户名和密码，装完最后一步设置。
+  - 已知限制：退出只清本浏览器的 Cookie，那个会话本身到过期前仍然有效（改密码会让所有会话失效）；登录失败只有 1 秒延迟，没有锁定；面板是 HTTP，局域网里能抓包的人能拿到 Cookie。
 
 ## 9. 部署
 
@@ -470,7 +476,7 @@ DNS 和代理在同一台 VM 上。客户端的 DNS 指向这台 VM；FakeIP 网
 - **下载**（脚本）：配套包 `atom-<版本>-linux-amd64.tar.gz`（一个包：atomdns、补丁版 sing-box、`atom-installer`、`atom-webui.tar.gz`、默认配置、`manifest.json`），来源按顺序试：GitHub Release 直连，然后加速前缀（`gh-proxy.com`、`ghfast.top`、`down.mxw.xx.kg`、`gh.noki.icu`，可用 `ATOM_MIRRORS` 改）。连接 6 秒没通，或速度低于 50 KB/s 持续 10 秒，就换下一个。包的 sha256 在发版时写进 `install.sh`，任何来源下载的都要校验，不过就丢弃换下一个（加速源是第三方）。`ATOM_PKG` 可以指定本地包或地址（开发和离线用）。第 7 步没有发布 Release：下载路径用本地模拟的"GitHub 不通、慢镜像、好镜像"验证过，没有真实访问过 GitHub 上的包；公共加速源的可用性会变（2026-11-11 探测：`gh-proxy.com`、`ghfast.top` 通，`ghproxy.net` 超时，`mirror.ghproxy.com` 连不上），上线前要再核。2026-11-13 在阿里云广州（不走代理）用 38MB 的 v0.1.0 包实测（每个源最多 40 秒，核对 sha256）：直连只有 43 KB/s；`gh-proxy.com` 4.5 MB/s、`ghfast.top` 5.9 MB/s；`ghproxy.net` 90 KB/s，`ghproxy.homeboyc.cn` 403，`toolwa.com` 402（部署停用），这三个不用；`github.akams.cn` 是节点列表页，从它列出的 67 个公益节点里选了较快的 `down.mxw.xx.kg`（10 MB/s）、`gh.noki.icu`（7.9 MB/s）放在后面（个人节点，可能失效，靠 sha256 兜底）。
 - **向导**（`web/index.html`，只放标签、错误和两处必须的提示：网关形态的警告，完成页的两步：主路由加静态路由 FakeIP 网段 → LAN IP、客户端 DNS 设为 LAN IP，两种拓扑一样）：
   1. 环境：系统（Debian 12+、Ubuntu 22.04+、x86_64、systemd、root）；53 端口被占时列出占用者并给按钮：systemd-resolved 的 stub 写 drop-in 关掉并把 `/etc/resolv.conf` 指到上游列表，其他 systemd 服务停止并禁用，不是服务的只提示；做完显示"已处理完毕"。
-  2. 网络：单网卡旁路由或双网卡网关，选网卡；选网关必须勾选确认（警告 2026-11-12 改为"主路由需要把 FakeIP 网段和要代理的网段转到这台机器"）；面板端口，默认 **80**。
+  2. 网络：单网卡旁路由或双网卡网关，选网卡；选网关必须勾选确认（警告 2026-11-12 改为"主路由需要把 FakeIP 网段和要代理的网段转到这台机器"）；面板端口，默认 **80**；面板用户名和密码（2026-11-14 加，可选：留空就不需要登录，保留数据重装时留空就不改；见第 8 节"面板登录"）。
      - 双网卡网关另有"LAN 侧网关"和"客户端网段"（2026-11-12，用户在 atom 测试机上发现）：客户端不在 LAN 网段、经 LAN 侧的路由器过来时，本机的应答（DNS、redirect 和 TProxy 的回包、NAT 回来的包）会沿默认路由从 WAN 出去。向导按本机已有的、经 LAN 网卡的路由预填这两项；安装器在 `policy-route.sh` 里对每个网段写 `ip route replace <网段> via <LAN 侧网关> dev <LAN 网卡>`，随 `atom-dns.service` 每次启动加回。没用连接标记改道：atomdns 的 UDP 监听在通配地址、按路由选源地址，改道改不了已经选成 WAN 地址的源，DNS 仍然不通。都留空表示客户端都在 LAN 网段。
      - 单网卡旁路由可以勾"回包经主路由"（2026-11-14，用户定），填主路由地址（默认是 LAN 网卡默认路由的网关）：导入 sing-box 的连接打连接标记，回包按标记经表 234 交给主路由，主路由能看到两个方向的包；同时关掉 LAN 网卡接收 ICMP 重定向。默认不勾。规则见 deploy-nft.md 3.4。
      - 所有权：网段原来就有同一网关、同一网卡的路由，就算机器自己的，卸载不删；网关不同就拒绝安装。安装器加的记在 `changes.json` 的 `routes`，拆网络时只删这些；重装时不再需要的旧路由当场删掉。
@@ -480,7 +486,7 @@ DNS 和代理在同一台 VM 上。客户端的 DNS 指向这台 VM；FakeIP 网
   5. 确认并安装：实时进度，装完自检，倒计时跳转面板。
 - **访问控制 [定]**：安装器不要令牌；默认端口 9996，被占就由系统另选一个空闲端口。只接受私网和回环来源的请求，Host 只认 IP、localhost 和本机名，写操作必须是同源的 JSON；闲置 30 分钟自动退出，装完 5 分钟内无人使用也退出。向导只有一个关闭入口（`/api/finish`、闲置计时器、引导脚本都走它）：有安装在跑就拒绝，否则标记 closing，此后不再接受安装和"停用"，然后退出；引导脚本只在收到 200 并且向导单元退出之后才替换包，超时或其他回应一律拒绝并提示手动处理。
 - **装到哪里 [定]**：全部在 `/opt/atom/`：`bin/`（atomdns、sing-box、atom-installer）、`etc/`（nft 规则、`install.json`、`changes.json`）、`lib/policy-route.sh`、`data/`（配置根，atomdns 的 `-d`）、`backup/`。`/opt/atom` 之外只有两个 systemd 单元 `atom-dns.service`、`atom-sing-box.service`，以及用"停用系统 DNS 占用"时写的 resolved drop-in 和 `/etc/resolv.conf` 的链接；`ip_forward` 由 `atom-dns.service` 的 `ExecStartPre` 设置，不写 `/etc/sysctl.d`。`changes.json` 记录安装器改过的系统设置（resolved、停用的服务、`ip_forward` 原值、装过的软件包），卸载按它还原。产品配置里 sing-box 的路径是 `/opt/atom/bin/sing-box`。
-- **安装步骤**：依赖（缺 nftables、iproute2 就 apt 装）→ 程序 → 配置（`data/` 和 `ui/main/`，面板端口写进 `config_custom.yaml` 的 `api.http`）→ 网络（`nft -c` 校验后写 nft 规则、策略路由脚本和两个单元；`atom-dns.service` 的 `ExecStartPre` 依次加载 `atom.nft`、网关形态再加 `atom-gateway.nft` 和 `sysctl -w net.ipv4.ip_forward=1`、`policy-route.sh`，见 deploy-nft.md 第 4 节）→ 启动（有上次留下的 sing-box 配置就先重启 sing-box，再重启 atomdns）→ 设置（调用 atomdns 的 API；失败只警告，面板里可以改）→ 自检（两个服务、端口、`status` 里 sing-box 与配置一致，`www.google.com` 得到 FakeIP、`www.baidu.com` 得到真实 IP；DNS 自检只警告）。
+- **安装步骤**：依赖（缺 nftables、iproute2 就 apt 装）→ 程序 → 配置（`data/` 和 `ui/main/`，面板端口写进 `config_custom.yaml` 的 `api.http`）→ 网络（`nft -c` 校验后写 nft 规则、策略路由脚本和两个单元；`atom-dns.service` 的 `ExecStartPre` 依次加载 `atom.nft`、网关形态再加 `atom-gateway.nft` 和 `sysctl -w net.ipv4.ip_forward=1`、`policy-route.sh`，见 deploy-nft.md 第 4 节）→ 启动（有上次留下的 sing-box 配置就先重启 sing-box，再重启 atomdns）→ 设置（调用 atomdns 的 API；失败只警告，面板里可以改；填了面板登录的话最后设置它，之后安装器的请求都带 `webinfo/atom_auth.json` 里的密钥）→ 自检（两个服务、端口、`status` 里 sing-box 与配置一致，`www.google.com` 得到 FakeIP、`www.baidu.com` 得到真实 IP；DNS 自检只警告）。
 - **失败和所有权**：`changes.json` 里的 `network` 在安装器开始改网络（写 nft 规则、单元、`ip_forward`、策略路由）时置位，撤销或拆除后清除；只有置位时才拆网络（停服务、删 nft 表、`ip rule`、清空表 233、恢复 `ip_forward`），所以回滚过的安装、或别人后来用了表 233，卸载都不会去动。表 233 已被别的配置使用时，安装在改任何东西之前就被拒绝。任何一步失败，撤销网络部分，文件和已做的 53 端口处理保留，页面显示错误和日志，可以返回修改或重试。
 - **重复运行和数据**：向导完成时在 `data/.atom-data` 留一个标记。有标记（卸载时保留了数据）就沿用里面的设置、规则和节点，向导只问环境和网络，DNS 与 sing-box 两步不出现；没有标记（第一次，或上一次没装完）时，向导的值和 atomdns 现在的值比较，不同才写。
 - **升级**：再粘贴同一条命令。已装好（`install.json` 里 `complete`）就由新包里的 `atom-installer upgrade` 做：同版本什么都不做，更旧的拒绝（`--force` 可以）；先备份程序、nft 规则、单元和自带配置到 `backup/`（留最近 3 份），再换程序、覆盖自带配置（`config_custom.yaml`、`sub_config/`、`rule/atom_catalog.json`、`ui/main/`），保留 `webinfo/`、每日更新下载的规则和缓存，重新生成 nft 规则和单元，重启 atom-dns（sing-box 程序变了才重启它）；atomdns 的接口起不来或 sing-box 没有处于最新配置，就恢复备份并等服务恢复。
@@ -568,7 +574,7 @@ atom/          jasonxtt/atom
 9. **规则页：原判断和内置规则集选择**（2026-11-12，用户定）**[定]**：
    - 规则列表最后固定一行"未命中以上规则"，带 DNS 标签：这部分是 AtomDNS 的 DNS 判断（3.1 第 3 层），不是 sing-box 的路由规则。不能拖动、编辑、删除。展开后按配置里的实际顺序列出 A/AAAA 查询的分支（`sequence_6666` 规则表之后、`process_listed.yaml`、`process_v4/v6.yaml`）：学到的无 V4 / 无 V6 → 空应答；`geosite_no_cn` → FakeIP · 代理 · 兜底分组；`geosite_cn` → 直连 · 国内 DNS；记忆代理 → FakeIP · 代理 · 兜底分组；记忆直连 → 直连（兼容模式国内 DNS，安全模式国外 DNS）；其余 → 按核心模式探测（兼容国内 DNS，安全国外 DNS）：国内 IP 或 `direct_ip` 直连，其他 IP FakeIP · 代理 · 兜底分组，上游没有给 IP 的不给地址（AAAA 学"无 V6"；兼容模式下 AAAA 失败也走 FakeIP，sing-box 对 AAAA 不给地址），并学习。注意 `geosite_no_cn` 排在 `geosite_cn` 前面、记忆代理排在记忆直连前面，这是 YAML 的顺序。
    - 开关按 `GET dns` 的实际状态显示：空应答那一支要"空结果屏蔽"开着、对应学习类别生效；学习类别生效 = 总开关且类别开关（和 `route_learner` 编译时一样）；关掉的分支标"关"。跳转：geosite → 规则集页对应的默认规则集（`/rules/sets?set=<id>`），学习类分支 → DNS 高级设置的域名学习，其余 → 核心模式（`/dns/settings?at=learning|mode`）。代码 `webui/src/original.ts`（测试 `tests/original.test.mjs`）。
-   - 新建条件的规则集选择框只列 MetaCubeX 和 blackmatrix7 的目录条目，不再列默认规则集（`adguard`、`geosite_cn`、`geosite_no_cn`、`cuscn`、`cusnocn`）。已经引用默认规则集的规则（默认规则表第 2～4 条）照常显示、编辑、保存，可以删掉这个条件；删掉以后不能再从选择框选回来（用户接受：广告规则改用目录里的规则集）。
+   - 新建条件的规则集选择框只列 MetaCubeX 和 blackmatrix7 的目录条目，不再列默认规则集（`adguard`、`geosite_cn`、`geosite_no_cn`、`cuscn`、`cusnocn`）。已经引用默认规则集的规则（默认规则表第 2、3 条，以及旧安装里的广告规则）照常显示、编辑、保存，可以删掉这个条件；删掉以后不能再从选择框选回来（用户接受：广告规则改用目录里的规则集）。
 
 10. **规则页：测试域名改成 dry-run**（2026-11-12，用户定）**[定]**：测试框调用 `POST rules/dryrun`（第 8 节），按真实流程的顺序列出每一步命中与否和原因，给出结论；代理时把组按 sing-box 当前选中项展开到节点；对照绑定账本。探测真的查上游但不留痕迹，不读不写缓存。代码 `webui/src/dryrun.ts`（测试 `tests/dryrun.test.mjs`）、`RulesPage.vue`。
 

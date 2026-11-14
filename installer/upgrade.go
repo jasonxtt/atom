@@ -100,7 +100,7 @@ func (ins *Installer) applyUpgrade(st *InstallState, oldSingBox string, log Logg
 	if err := runCmd(log, 60*time.Second, "systemctl", "restart", dnsUnitName); err != nil {
 		return err
 	}
-	api := newAPIClient(st.PanelPort)
+	api := newAPIClient(st.PanelPort, ins.Paths.Data())
 	if _, err := api.waitStatus(60*time.Second, func(*apiStatus) bool { return true }); err != nil {
 		return fmt.Errorf("atomdns 的管理接口没有起来: %w", err)
 	}
@@ -204,7 +204,7 @@ func (ins *Installer) restoreBackup(dir string, panelPort int, log Logger) error
 	if err := runCmd(log, 60*time.Second, "systemctl", "restart", singBoxUnitName); err != nil {
 		return err
 	}
-	if _, err := newAPIClient(panelPort).waitStatus(60*time.Second, func(s *apiStatus) bool { return s.SingBox.Running && s.SingBox.InSync }); err != nil {
+	if _, err := newAPIClient(panelPort, ins.Paths.Data()).waitStatus(60*time.Second, func(s *apiStatus) bool { return s.SingBox.Running && s.SingBox.InSync }); err != nil {
 		return fmt.Errorf("恢复后服务没有起来: %w", err)
 	}
 	log.Logf("已恢复，服务正常")

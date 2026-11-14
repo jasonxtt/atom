@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -14,10 +16,30 @@ import (
 type apiClient struct {
 	base string
 	http *http.Client
+	// authFile is the panel login of the data directory (webinfo/atom_auth.json); while it exists every
+	// request carries its key.
+	authFile string
 }
 
-func newAPIClient(port int) *apiClient {
-	return &apiClient{base: fmt.Sprintf("http://127.0.0.1:%d/api/v1/atom", port), http: &http.Client{Timeout: 90 * time.Second}}
+func newAPIClient(port int, data string) *apiClient {
+	return &apiClient{
+		base:     fmt.Sprintf("http://127.0.0.1:%d/api/v1/atom", port),
+		http:     &http.Client{Timeout: 90 * time.Second},
+		authFile: filepath.Join(data, "webinfo", "atom_auth.json"),
+	}
+}
+
+// key is the key of the panel login, "" without one.
+func (a *apiClient) key() string {
+	data, err := os.ReadFile(a.authFile)
+	if err != nil {
+		return ""
+	}
+	var f struct {
+		Key string `json:"key"`
+	}
+	_ = json.Unmarshal(data, &f)
+	return f.Key
 }
 
 type apiStatus struct {
@@ -54,6 +76,9 @@ func (a *apiClient) call(method, path string, body, out any) error {
 		}
 		if body != nil {
 			req.Header.Set("Content-Type", "application/json")
+		}
+		if key := a.key(); key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
 		}
 		resp, err := a.http.Do(req)
 		if err != nil {

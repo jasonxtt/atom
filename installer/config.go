@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Config is what the wizard collects.
@@ -17,7 +19,9 @@ type Config struct {
 	ReplyVia      bool     `json:"reply_via"`   // bypass only: answers to the LAN go back through the main router
 	Router        string   `json:"router"`      // bypass only, with ReplyVia: the main router
 	PanelPort     int      `json:"panel_port"`
-	Domestic      string   `json:"domestic"` // upstream lines
+	PanelUser     string   `json:"panel_user"`     // the panel login; both empty: no login (a kept one stays)
+	PanelPassword string   `json:"panel_password"` // sent to atomdns only, never written by the installer
+	Domestic      string   `json:"domestic"`       // upstream lines
 	Foreign       string   `json:"foreign"`
 	FakeIPRange   string   `json:"fakeip_range"`
 	MixedPort     int      `json:"mixed_port"`
@@ -129,6 +133,18 @@ func (c *Config) Validate(ifaces []Iface, installerPort int, busy func(port int)
 	}
 	if !c.keepData {
 		portOK("mixed_port", c.MixedPort)
+	}
+	user := strings.TrimSpace(c.PanelUser)
+	switch {
+	case user == "" && c.PanelPassword == "":
+	case user == "":
+		add("panel_user", "设置了密码就要填用户名")
+	case c.PanelPassword == "":
+		add("panel_password", "设置了用户名就要填密码")
+	case utf8.RuneCountInString(user) > 64 || strings.IndexFunc(user, unicode.IsControl) >= 0:
+		add("panel_user", "用户名最长 64 个字符，不能含控制字符")
+	case len(c.PanelPassword) > 256:
+		add("panel_password", "密码最长 256 字节")
 	}
 
 	if c.keepData {

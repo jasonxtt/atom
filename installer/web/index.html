@@ -277,7 +277,7 @@ const ART = {
   </svg>`,
 };
 
-const FIELD_STEP = { topology: 'net', lan: 'net', wan: 'net', accept_gateway: 'net', lan_gateway: 'net', client_nets: 'net', router: 'net', panel_port: 'net', domestic: 'dns', foreign: 'dns', fakeip_range: 'sb', mixed_port: 'sb' };
+const FIELD_STEP = { topology: 'net', lan: 'net', wan: 'net', accept_gateway: 'net', lan_gateway: 'net', client_nets: 'net', router: 'net', panel_port: 'net', panel_user: 'net', panel_password: 'net', domestic: 'dns', foreign: 'dns', fakeip_range: 'sb', mixed_port: 'sb' };
 // the DNS and sing-box steps are skipped when the data of an earlier installation is there: its settings stay
 function steps() {
   const all = [{ id: 'env', name: '环境检查', view: viewEnv }, { id: 'net', name: '网络', view: viewNet }, { id: 'dns', name: 'DNS 上游', view: viewDNS },
@@ -293,7 +293,7 @@ function initCfg(st) {
     topology: ifs.length >= 2 ? '' : 'bypass',
     lan: def ? [def.name] : [], wan: '', accept_gateway: false, lan_gateway: '', client_nets: '',
     reply_via: false, router: '',
-    panel_port: st.defaults.panel_port,
+    panel_port: st.defaults.panel_port, panel_user: '', panel_password: '',
     domestic: st.defaults.domestic, foreign: st.defaults.foreign,
     fakeip_range: st.defaults.fakeip_range, mixed_port: st.defaults.mixed_port, nodes: '',
   };
@@ -374,6 +374,10 @@ function viewNet() {
       <label class="agree"><input type="checkbox" data-bind="accept_gateway" ${c.accept_gateway ? 'checked' : ''}>我知道，继续</label>${errOf('accept_gateway')}</div></div>`;
   }
   h += `<div class="sec short"><label class="lbl" for="panel_port">面板端口</label><input class="inp${bad('panel_port')}" id="panel_port" type="number" min="1" max="65535" data-bind="panel_port" value="${esc(c.panel_port)}">${errOf('panel_port')}</div>`;
+  h += `<div class="g2">
+    <div class="sec"><label class="lbl" for="panel_user">面板用户名 <span class="tag">可选</span></label><input class="inp${bad('panel_user')}" id="panel_user" type="text" data-bind="panel_user" value="${esc(c.panel_user)}" autocomplete="off" spellcheck="false" placeholder="${S.state.has_data ? '留空不修改' : '留空则面板不需要登录'}">${errOf('panel_user')}</div>
+    <div class="sec"><label class="lbl" for="panel_password">面板密码</label><input class="inp${bad('panel_password')}" id="panel_password" type="password" data-bind="panel_password" value="${esc(c.panel_password)}" autocomplete="new-password">${errOf('panel_password')}</div>
+  </div>`;
   return h;
 }
 
@@ -402,6 +406,7 @@ function viewConfirm() {
   let h = head('确认') + '<div class="tiles">';
   h += tile('部署方式', gw ? '双网卡网关' : '单网卡旁路由', gw ? `<span class="chip">LAN ${esc(c.lan.join(', '))}</span> <span class="chip wan">WAN ${esc(c.wan)}</span>` : esc(c.lan[0] || ''));
   h += tile('面板端口', esc(c.panel_port));
+  h += tile('面板登录', c.panel_user.trim() ? `用户名 <span class="mono">${esc(c.panel_user.trim())}</span>` : (S.state.has_data ? '不修改' : '不需要登录'));
   if (gw) {
     const nets = c.client_nets.split('\n').map(x => x.trim()).filter(Boolean);
     h += tile('回程路由', nets.length ? `<span class="mono">${esc(nets.join(', '))}</span>` : '不需要', nets.length ? `经 LAN 侧网关 <span class="mono">${esc(c.lan_gateway)}</span>` : '客户端都在 LAN 网段', true);

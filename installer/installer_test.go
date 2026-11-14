@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -170,6 +171,57 @@ func TestCheckFakeIPRange(t *testing.T) {
 		if checkFakeIPRange(bad) == nil {
 			t.Errorf("%q must be refused", bad)
 		}
+	}
+}
+
+func TestValidatePanelLogin(t *testing.T) {
+	ifs := []Iface{{Name: "eth0"}}
+	free := func(int) string { return "" }
+	base := Config{Topology: "bypass", LAN: []string{"eth0"}, PanelPort: 80, Domestic: defaultDomestic, Foreign: defaultForeign, FakeIPRange: defaultFakeIP, MixedPort: 7890}
+	for _, tc := range []struct {
+		user, password, field string
+	}{
+		{"", "", ""},
+		{"admin", "pw", ""},
+		{" ", "pw", "panel_user"},
+		{"admin", "", "panel_password"},
+		{"a\tb", "pw", "panel_user"},
+		{strings.Repeat("u", 65), "pw", "panel_user"},
+		{"admin", strings.Repeat("p", 257), "panel_password"},
+	} {
+		c := base
+		c.PanelUser, c.PanelPassword = tc.user, tc.password
+		errs := c.Validate(ifs, 9996, free)
+		got := ""
+		if len(errs) > 0 {
+			got = errs[0].Field
+		}
+		if len(errs) > 1 || got != tc.field {
+			t.Errorf("%q/%q: %+v, want %q", tc.user, tc.password, errs, tc.field)
+		}
+	}
+}
+
+func TestAPIClientSendsTheLoginKey(t *testing.T) {
+	data := t.TempDir()
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Header.Get("Authorization"))
+		w.Write([]byte("{}"))
+	}))
+	defer srv.Close()
+	api := newAPIClient(0, data)
+	api.base = srv.URL
+	if err := api.call("GET", "/status", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(filepath.Join(data, "webinfo"), 0o755)
+	os.WriteFile(filepath.Join(data, "webinfo", "atom_auth.json"), []byte(`{"username":"u","salt":"s","hash":"h","key":"K1"}`), 0o600)
+	if err := api.call("GET", "/status", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "" || got[1] != "Bearer K1" {
+		t.Errorf("headers: %q", got)
 	}
 }
 
